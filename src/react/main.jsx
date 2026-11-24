@@ -183,6 +183,26 @@ function App() {
     }
   });
 
+  // New States: Cuisine & Dietary Filter Pills
+  const [selectedCuisineFilter, setSelectedCuisineFilter] = useState("All");
+
+  // New States: Admin Dashboard Tabs & Forms
+  const [adminActiveTab, setAdminActiveTab] = useState("orders"); // "orders", "applications", "add-kitchen", "add-dish"
+  const [newKitchenName, setNewKitchenName] = useState("");
+  const [newKitchenCuisines, setNewKitchenCuisines] = useState("");
+  const [newKitchenTime, setNewKitchenTime] = useState(30);
+  const [newKitchenCost, setNewKitchenCost] = useState(350);
+  const [newKitchenLocation, setNewKitchenLocation] = useState("Indirapuram, Ghaziabad");
+  const [newKitchenImage, setNewKitchenImage] = useState("");
+
+  const [dishTargetRestaurantId, setDishTargetRestaurantId] = useState("");
+  const [newDishName, setNewDishName] = useState("");
+  const [newDishPrice, setNewDishPrice] = useState(180);
+  const [newDishCategory, setNewDishCategory] = useState("Mains");
+  const [newDishIsVeg, setNewDishIsVeg] = useState(true);
+  const [newDishIsBestseller, setNewDishIsBestseller] = useState(false);
+  const [newDishDesc, setNewDishDesc] = useState("");
+
   const locationWatchId = useRef(null);
   const lastLocationSentAt = useRef(0);
 
@@ -802,6 +822,62 @@ function App() {
     }
   }
 
+  async function createRestaurant(e) {
+    e.preventDefault();
+    if (!newKitchenName.trim()) return;
+    try {
+      const payload = {
+        name: newKitchenName.trim(),
+        cuisines: newKitchenCuisines.split(",").map((c) => c.trim()).filter(Boolean),
+        deliveryTime: Number(newKitchenTime) || 30,
+        costForTwo: Number(newKitchenCost) || 350,
+        location: newKitchenLocation.trim(),
+        image: newKitchenImage.trim() || undefined,
+      };
+      await api("/api/admin/restaurants", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+      setNotice(`Kitchen "${newKitchenName}" created successfully!`);
+      setNewKitchenName("");
+      setNewKitchenCuisines("");
+      setNewKitchenImage("");
+      setAdminActiveTab("orders");
+      // Refresh restaurant listing
+      api(`/api/restaurants?search=${encodeURIComponent(search)}`).then(setRestaurants).catch(() => {});
+    } catch (err) {
+      setNotice(err.message || "Failed to create kitchen");
+    }
+  }
+
+  async function createDish(e) {
+    e.preventDefault();
+    const restId = dishTargetRestaurantId || restaurants[0]?._id;
+    if (!restId || !newDishName.trim()) return;
+    try {
+      const payload = {
+        name: newDishName.trim(),
+        price: Number(newDishPrice) || 150,
+        category: newDishCategory.trim() || "Mains",
+        isVeg: Boolean(newDishIsVeg),
+        isBestseller: Boolean(newDishIsBestseller),
+        description: newDishDesc.trim() || undefined,
+      };
+      await api(`/api/admin/restaurants/${restId}/menu`, {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+      setNotice(`Dish "${newDishName}" added to menu!`);
+      setNewDishName("");
+      setNewDishDesc("");
+      setAdminActiveTab("orders");
+      // Refresh restaurant listing
+      api(`/api/restaurants?search=${encodeURIComponent(search)}`).then(setRestaurants).catch(() => {});
+    } catch (err) {
+      setNotice(err.message || "Failed to add dish");
+    }
+  }
+
   async function sendOrderToPartnerQueue(order) {
     try {
       const updated = await api(`/api/admin/orders/${order._id}/status`, {
@@ -915,8 +991,44 @@ function App() {
           <div className="offer">50% OFF</div>
         </section>
 
+        {/* Horizontal Cuisine & Quick Filter Pills Bar */}
+        <div className="cuisine-filter-bar">
+          {[
+            ["All", "🍽️ All Cuisines"],
+            ["Biryani", "🍚 Biryani"],
+            ["North Indian", "🥘 North Indian"],
+            ["Thalis", "🍛 Thalis"],
+            ["Pizza", "🍕 Pizza"],
+            ["Burgers", "🍔 Burgers"],
+            ["South Indian", "🥞 South Indian"],
+            ["Chinese", "🍜 Chinese"],
+            ["Pure Veg", "🌱 Pure Veg"],
+            ["Fast", "⚡ Under 30 Mins"],
+            ["Budget", "💰 Under ₹350"],
+          ].map(([key, label]) => (
+            <button
+              type="button"
+              key={key}
+              className={`cuisine-pill ${selectedCuisineFilter === key ? "active" : ""}`}
+              onClick={() => setSelectedCuisineFilter(key)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
         <section className="grid">
-          {restaurants.map((restaurant) => (
+          {restaurants
+            .filter((restaurant) => {
+              if (selectedCuisineFilter === "All") return true;
+              if (selectedCuisineFilter === "Pure Veg") return restaurant.isPureVeg;
+              if (selectedCuisineFilter === "Fast") return Number(restaurant.deliveryTime) <= 30;
+              if (selectedCuisineFilter === "Budget") return Number(restaurant.costForTwo) <= 350;
+              return (restaurant.cuisines || []).some((c) =>
+                c.toLowerCase().includes(selectedCuisineFilter.toLowerCase())
+              );
+            })
+            .map((restaurant) => (
             <article className="card" key={restaurant._id}>
               {restaurant.image && (
                 <img src={restaurant.image} alt="" className="card-image" />
@@ -1157,9 +1269,9 @@ function App() {
           <section className="admin-modal" onMouseDown={(event) => event.stopPropagation()}>
             <div className="admin-dashboard-heading">
               <div>
-                <h2>Live order dashboard</h2>
+                <h2>Admin Control Center</h2>
                 <p className="muted">
-                  All orders from all customers with live status updates
+                  Live orders, delivery partner applications, and kitchen management
                 </p>
               </div>
               <div className="admin-dashboard-actions">
@@ -1177,61 +1289,244 @@ function App() {
                 <button type="button" className="close" onClick={() => setAdminOpen(false)}>×</button>
               </div>
             </div>
+
+            {/* Admin Tabs */}
+            <div className="admin-tab-row">
+              <button
+                type="button"
+                className={`admin-nav-tab ${adminActiveTab === "orders" ? "active" : ""}`}
+                onClick={() => setAdminActiveTab("orders")}
+              >
+                Live Orders ({adminOrders.length})
+              </button>
+              <button
+                type="button"
+                className={`admin-nav-tab ${adminActiveTab === "applications" ? "active" : ""}`}
+                onClick={() => setAdminActiveTab("applications")}
+              >
+                Rider Applications ({partnerApplications.length})
+              </button>
+              <button
+                type="button"
+                className={`admin-nav-tab ${adminActiveTab === "add-kitchen" ? "active" : ""}`}
+                onClick={() => setAdminActiveTab("add-kitchen")}
+              >
+                + Add Kitchen
+              </button>
+              <button
+                type="button"
+                className={`admin-nav-tab ${adminActiveTab === "add-dish" ? "active" : ""}`}
+                onClick={() => setAdminActiveTab("add-dish")}
+              >
+                + Add Dish to Menu
+              </button>
+            </div>
+
             {adminStreamError && (
               <p className="admin-stream-error" role="alert">{adminStreamError}</p>
             )}
-            <section className="partner-approval-section">
-              <h3>Delivery partner applications</h3>
-              {partnerApplicationsError && <p className="admin-stream-error" role="alert">{partnerApplicationsError}</p>}
-              {partnerApplications.length === 0 ? (
-                <p className="muted">No pending applications.</p>
+
+            {/* TAB: Add Kitchen Form */}
+            {adminActiveTab === "add-kitchen" && (
+              <form className="admin-form-card" onSubmit={createRestaurant}>
+                <h3 style={{ margin: "0 0 12px", fontSize: 15, fontWeight: 800 }}>Add New Restaurant / Cloud Kitchen</h3>
+                <div className="admin-form-grid">
+                  <div>
+                    <label>Kitchen Name *</label>
+                    <input
+                      required
+                      placeholder="e.g. Royal Biryani Darbar"
+                      value={newKitchenName}
+                      onChange={(e) => setNewKitchenName(e.target.value)}
+                    />
+                  </div>
+                  <div>
+                    <label>Cuisines (comma separated) *</label>
+                    <input
+                      required
+                      placeholder="e.g. Biryani, Mughlai, Kebabs"
+                      value={newKitchenCuisines}
+                      onChange={(e) => setNewKitchenCuisines(e.target.value)}
+                    />
+                  </div>
+                  <div>
+                    <label>Delivery Time (mins)</label>
+                    <input
+                      type="number"
+                      min="10"
+                      max="90"
+                      value={newKitchenTime}
+                      onChange={(e) => setNewKitchenTime(e.target.value)}
+                    />
+                  </div>
+                  <div>
+                    <label>Cost for Two (₹)</label>
+                    <input
+                      type="number"
+                      min="50"
+                      max="5000"
+                      value={newKitchenCost}
+                      onChange={(e) => setNewKitchenCost(e.target.value)}
+                    />
+                  </div>
+                  <div>
+                    <label>Location</label>
+                    <input
+                      placeholder="e.g. Indirapuram, Ghaziabad"
+                      value={newKitchenLocation}
+                      onChange={(e) => setNewKitchenLocation(e.target.value)}
+                    />
+                  </div>
+                  <div>
+                    <label>Cover Image URL (optional)</label>
+                    <input
+                      placeholder="https://..."
+                      value={newKitchenImage}
+                      onChange={(e) => setNewKitchenImage(e.target.value)}
+                    />
+                  </div>
+                </div>
+                <button type="submit" className="partner-action" style={{ padding: "8px 20px" }}>
+                  Save & Publish Kitchen
+                </button>
+              </form>
+            )}
+
+            {/* TAB: Add Dish Form */}
+            {adminActiveTab === "add-dish" && (
+              <form className="admin-form-card" onSubmit={createDish}>
+                <h3 style={{ margin: "0 0 12px", fontSize: 15, fontWeight: 800 }}>Add Dish to Kitchen Menu</h3>
+                <div className="admin-form-grid">
+                  <div>
+                    <label>Target Kitchen *</label>
+                    <select
+                      value={dishTargetRestaurantId || (restaurants[0]?._id || "")}
+                      onChange={(e) => setDishTargetRestaurantId(e.target.value)}
+                    >
+                      {restaurants.map((r) => (
+                        <option key={r._id} value={r._id}>{r.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label>Dish Name *</label>
+                    <input
+                      required
+                      placeholder="e.g. Butter Chicken Gravy"
+                      value={newDishName}
+                      onChange={(e) => setNewDishName(e.target.value)}
+                    />
+                  </div>
+                  <div>
+                    <label>Price (₹) *</label>
+                    <input
+                      type="number"
+                      min="1"
+                      required
+                      value={newDishPrice}
+                      onChange={(e) => setNewDishPrice(e.target.value)}
+                    />
+                  </div>
+                  <div>
+                    <label>Category</label>
+                    <input
+                      placeholder="e.g. Mains, Starters, Breads"
+                      value={newDishCategory}
+                      onChange={(e) => setNewDishCategory(e.target.value)}
+                    />
+                  </div>
+                </div>
+                <div style={{ display: "flex", gap: 16, margin: "8px 0 12px" }}>
+                  <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer", textTransform: "none", fontSize: 12 }}>
+                    <input
+                      type="checkbox"
+                      checked={newDishIsVeg}
+                      onChange={(e) => setNewDishIsVeg(e.target.checked)}
+                    />
+                    🌱 Pure Vegetarian
+                  </label>
+                  <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer", textTransform: "none", fontSize: 12 }}>
+                    <input
+                      type="checkbox"
+                      checked={newDishIsBestseller}
+                      onChange={(e) => setNewDishIsBestseller(e.target.checked)}
+                    />
+                    ★ Bestseller Dish
+                  </label>
+                </div>
+                <div style={{ marginBottom: 12 }}>
+                  <label>Description (optional)</label>
+                  <input
+                    placeholder="Short description of ingredients or preparation…"
+                    value={newDishDesc}
+                    onChange={(e) => setNewDishDesc(e.target.value)}
+                  />
+                </div>
+                <button type="submit" className="partner-action" style={{ padding: "8px 20px" }}>
+                  Add Dish to Menu
+                </button>
+              </form>
+            )}
+
+            {/* TAB: Rider Applications */}
+            {adminActiveTab === "applications" && (
+              <section className="partner-approval-section">
+                <h3>Delivery partner applications</h3>
+                {partnerApplicationsError && <p className="admin-stream-error" role="alert">{partnerApplicationsError}</p>}
+                {partnerApplications.length === 0 ? (
+                  <p className="muted">No pending applications.</p>
+                ) : (
+                  <div className="partner-application-list">
+                    {partnerApplications.map((partner) => (
+                      <article className="partner-application" key={partner._id}>
+                        <div><strong>{partner.name}</strong><span>{partner.email} · {partner.phone || "No phone"}</span></div>
+                        <button type="button" onClick={() => approvePartner(partner._id)}>Approve</button>
+                      </article>
+                    ))}
+                  </div>
+                )}
+              </section>
+            )}
+
+            {/* TAB: Live Orders */}
+            {adminActiveTab === "orders" && (
+              adminOrders.length === 0 ? (
+                <p className="muted">
+                  {adminStreamStatus === "live"
+                    ? "No orders found."
+                    : "Loading orders…"}
+                </p>
               ) : (
-                <div className="partner-application-list">
-                  {partnerApplications.map((partner) => (
-                    <article className="partner-application" key={partner._id}>
-                      <div><strong>{partner.name}</strong><span>{partner.email} · {partner.phone || "No phone"}</span></div>
-                      <button type="button" onClick={() => approvePartner(partner._id)}>Approve</button>
+                <div className="admin-order-list">
+                  {adminOrders.map((order) => (
+                    <article className="admin-order" key={order._id}>
+                      <div>
+                        <strong>{order.orderCode}</strong>
+                        <span className={`order-status ${String(order.status).toLowerCase()}`}>
+                          {order.status} · {order.paymentStatus}
+                        </span>
+                      </div>
+                      <p><b>Customer:</b> {order.customerName || "Not provided"}</p>
+                      <p><b>Phone:</b> {order.customerPhone || "Not provided"}</p>
+                      <p><b>Address:</b> {order.deliveryAddress || "Not provided"}</p>
+                      <p><b>Restaurant:</b> {order.restaurantName}</p>
+                      <p><b>Items:</b> {(order.items || []).map((item) => `${item.name} ×${item.qty}`).join(", ") || "Not provided"}</p>
+                      <p><b>Total:</b> ₹{order.grandTotal}</p>
+                      <p><b>Placed:</b> {order.createdAt ? new Date(order.createdAt).toLocaleString() : "Not provided"}</p>
+                      {order.assignedPartnerId && <p><b>Delivery partner:</b> {order.assignedPartnerName || "Assigned"}</p>}
+                      {order.status === "CONFIRMED" && (
+                        <button type="button" className="partner-action" onClick={() => sendOrderToPartnerQueue(order)}>
+                          Send to partner claim queue
+                        </button>
+                      )}
+                      {order.status === "PREPARING" && !order.assignedPartnerId && (
+                        <p className="muted">Available in the delivery partner claim queue.</p>
+                      )}
+                      {order.assignedPartnerId && <LiveDeliveryMap order={order} />}
                     </article>
                   ))}
                 </div>
-              )}
-            </section>
-            {adminOrders.length === 0 ? (
-              <p className="muted">
-                {adminStreamStatus === "live"
-                  ? "No orders found."
-                  : "Loading orders…"}
-              </p>
-            ) : (
-              <div className="admin-order-list">
-                {adminOrders.map((order) => (
-                  <article className="admin-order" key={order._id}>
-                    <div>
-                      <strong>{order.orderCode}</strong>
-                      <span className={`order-status ${String(order.status).toLowerCase()}`}>
-                        {order.status} · {order.paymentStatus}
-                      </span>
-                    </div>
-                    <p><b>Customer:</b> {order.customerName || "Not provided"}</p>
-                    <p><b>Phone:</b> {order.customerPhone || "Not provided"}</p>
-                    <p><b>Address:</b> {order.deliveryAddress || "Not provided"}</p>
-                    <p><b>Restaurant:</b> {order.restaurantName}</p>
-                    <p><b>Items:</b> {(order.items || []).map((item) => `${item.name} ×${item.qty}`).join(", ") || "Not provided"}</p>
-                    <p><b>Total:</b> ₹{order.grandTotal}</p>
-                    <p><b>Placed:</b> {order.createdAt ? new Date(order.createdAt).toLocaleString() : "Not provided"}</p>
-                    {order.assignedPartnerId && <p><b>Delivery partner:</b> {order.assignedPartnerName || "Assigned"}</p>}
-                    {order.status === "CONFIRMED" && (
-                      <button type="button" className="partner-action" onClick={() => sendOrderToPartnerQueue(order)}>
-                        Send to partner claim queue
-                      </button>
-                    )}
-                    {order.status === "PREPARING" && !order.assignedPartnerId && (
-                      <p className="muted">Available in the delivery partner claim queue.</p>
-                    )}
-                    {order.assignedPartnerId && <LiveDeliveryMap order={order} />}
-                  </article>
-                ))}
-              </div>
+              )
             )}
           </section>
         </div>
