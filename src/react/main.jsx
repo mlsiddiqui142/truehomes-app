@@ -24,6 +24,7 @@ function App() {
   const [cart, setCart] = useState([]);
   const [cartOpen, setCartOpen] = useState(false);
   const [authOpen, setAuthOpen] = useState(false);
+  const [authMode, setAuthMode] = useState("login");
   const [user, setUser] = useState(null);
   const [notice, setNotice] = useState("");
 
@@ -67,19 +68,39 @@ function App() {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     try {
-      const data = await api("/api/auth/login", {
+      const endpoint =
+        authMode === "register"
+          ? "/api/auth/register"
+          : "/api/auth/login";
+      const payload = authMode === "register"
+        ? {
+            name: form.get("name"),
+            email: form.get("email"),
+            phone: form.get("phone"),
+            password: form.get("password"),
+          }
+        : {
+            email: form.get("email"),
+            password: form.get("password"),
+          };
+      const data = await api(endpoint, {
         method: "POST",
-        body: JSON.stringify({
-          email: form.get("email"),
-          password: form.get("password"),
-        }),
+        body: JSON.stringify(payload),
       });
       localStorage.setItem("truehomes_token", data.token);
       setUser(data.user);
       setAuthOpen(false);
-      setNotice(`Welcome, ${data.user.name}`);
+      setNotice(
+        authMode === "register"
+          ? `Account created, welcome ${data.user.name}`
+          : `Welcome, ${data.user.name}`
+      );
     } catch (error) {
-      setNotice(error.message);
+      setNotice(
+        authMode === "login" && /invalid email or password/i.test(error.message)
+          ? "Invalid email or password. Register if you do not have an account."
+          : error.message
+      );
     }
   }
 
@@ -188,10 +209,22 @@ function App() {
         <div className="modal-backdrop" onMouseDown={() => setAuthOpen(false)}>
           <form className="modal" onSubmit={login} onMouseDown={(event) => event.stopPropagation()}>
             <button type="button" className="close" onClick={() => setAuthOpen(false)}>×</button>
-            <h2>Sign in</h2>
+            <h2>{authMode === "login" ? "Sign in" : "Create account"}</h2>
+            <div className="auth-tabs">
+              <button type="button" className={authMode === "login" ? "active" : ""} onClick={() => setAuthMode("login")}>Sign in</button>
+              <button type="button" className={authMode === "register" ? "active" : ""} onClick={() => setAuthMode("register")}>Register</button>
+            </div>
+            {authMode === "register" && (
+              <>
+                <label>Name<input name="name" minLength="2" maxLength="60" required /></label>
+                <label>Phone<input name="phone" minLength="10" maxLength="15" required /></label>
+              </>
+            )}
             <label>Email<input name="email" type="email" required /></label>
-            <label>Password<input name="password" type="password" required /></label>
-            <button className="checkout" type="submit">Sign in</button>
+            <label>Password<input name="password" type="password" minLength="8" required /></label>
+            <button className="checkout" type="submit">
+              {authMode === "login" ? "Sign in" : "Create account"}
+            </button>
           </form>
         </div>
       )}
