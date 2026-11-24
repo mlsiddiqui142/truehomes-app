@@ -26,6 +26,9 @@ function App() {
   const [authOpen, setAuthOpen] = useState(false);
   const [authMode, setAuthMode] = useState("login");
   const [user, setUser] = useState(null);
+  const [accountOpen, setAccountOpen] = useState(false);
+  const [adminOpen, setAdminOpen] = useState(false);
+  const [adminOrders, setAdminOrders] = useState([]);
   const [notice, setNotice] = useState("");
 
   useEffect(() => {
@@ -125,6 +128,27 @@ function App() {
     } catch (error) {
       setNotice(error.message);
     }
+
+    async function logout() {
+      try {
+        await api("/api/auth/logout", { method: "POST" });
+      } catch (_) {}
+      localStorage.removeItem("truehomes_token");
+      setUser(null);
+      setAccountOpen(false);
+      setAdminOpen(false);
+      setNotice("Signed out");
+    }
+
+    async function openAdminOrders() {
+      setAccountOpen(false);
+      setAdminOpen(true);
+      try {
+        setAdminOrders(await api("/api/admin/orders"));
+      } catch (error) {
+        setNotice(error.message);
+      }
+    }
   }
 
   return (
@@ -138,11 +162,24 @@ function App() {
           placeholder="Search biryani, thali, pizza..."
         />
         <div className="actions">
-          <button onClick={() => setAuthOpen(true)}>{user?.name || "Sign in"}</button>
+          <button onClick={() => user ? setAccountOpen((open) => !open) : setAuthOpen(true)}>
+            {user?.name || "Sign in"}
+          </button>
           <button className="cart-button" onClick={() => setCartOpen(true)}>
             Cart <b>{cart.reduce((sum, item) => sum + item.qty, 0)}</b>
           </button>
         </div>
+        {accountOpen && user && (
+          <div className="account-menu">
+            <strong>{user.name}</strong>
+            <span>{user.email}</span>
+            <small>{String(user.role).replace("_", " ").toUpperCase()}</small>
+            {user.role === "admin" && (
+              <button type="button" onClick={openAdminOrders}>Admin orders</button>
+            )}
+            <button type="button" className="logout" onClick={logout}>Logout</button>
+          </div>
+        )}
       </header>
 
       {notice && (
@@ -226,6 +263,34 @@ function App() {
               {authMode === "login" ? "Sign in" : "Create account"}
             </button>
           </form>
+        </div>
+      )}
+
+      {adminOpen && (
+        <div className="modal-backdrop" onMouseDown={() => setAdminOpen(false)}>
+          <section className="admin-modal" onMouseDown={(event) => event.stopPropagation()}>
+            <button type="button" className="close" onClick={() => setAdminOpen(false)}>×</button>
+            <h2>Placed orders</h2>
+            {adminOrders.length === 0 ? (
+              <p className="muted">No orders found.</p>
+            ) : (
+              <div className="admin-order-list">
+                {adminOrders.map((order) => (
+                  <article className="admin-order" key={order._id}>
+                    <div>
+                      <strong>{order.orderCode}</strong>
+                      <span>{order.status} • {order.paymentStatus}</span>
+                    </div>
+                    <p><b>Customer:</b> {order.customerName || "Not provided"}</p>
+                    <p><b>Phone:</b> {order.customerPhone || "Not provided"}</p>
+                    <p><b>Address:</b> {order.deliveryAddress || "Not provided"}</p>
+                    <p><b>Restaurant:</b> {order.restaurantName}</p>
+                    <p><b>Total:</b> ₹{order.grandTotal}</p>
+                  </article>
+                ))}
+              </div>
+            )}
+          </section>
         </div>
       )}
     </div>
