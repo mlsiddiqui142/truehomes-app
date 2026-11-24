@@ -27,6 +27,8 @@ const orderSchema = new mongoose.Schema(
     paymentStatus: { type: String, enum: ['PENDING', 'PAID', 'COD'], default: 'PENDING' },
     razorpayOrderId: { type: String, default: null },
     razorpayPaymentId: { type: String, default: null },
+    razorpayReceipt: { type: String, default: null },
+    paymentVerifiedAt: { type: Date, default: null },
     assignedPartnerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
     assignedPartnerName: { type: String, default: null },
     status: {
@@ -37,5 +39,10 @@ const orderSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+orderSchema.index({ userId: 1, status: 1, createdAt: -1 });
+orderSchema.index({ assignedPartnerId: 1, status: 1, createdAt: -1 });
+orderSchema.index({ razorpayOrderId: 1 });
+orderSchema.index({ razorpayPaymentId: 1 }, { unique: true, sparse: true });
 
 module.exports = mongoose.model('Order', orderSchema);

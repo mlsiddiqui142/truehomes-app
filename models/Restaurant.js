@@ -14,6 +14,7 @@ const restaurantSchema = new mongoose.Schema({
   name: { type: String, required: true, trim: true },
   cuisines: [String],
   rating: { type: Number, default: 4.2, min: 1, max: 5 },
+  reviewCount: { type: Number, default: 0 },
   deliveryTime: { type: Number, default: 30 },
   costForTwo: { type: Number, default: 350 },
   isPureVeg: { type: Boolean, default: false },
@@ -23,5 +24,10 @@ const restaurantSchema = new mongoose.Schema({
   fssai: String,
   menu: [menuItemSchema]
 });
+
+restaurantSchema.index({ name: 1 });
+restaurantSchema.index({ cuisines: 1 });
+restaurantSchema.index({ isPureVeg: 1, deliveryTime: 1, rating: -1 });
+restaurantSchema.index({ name: 'text', cuisines: 'text', 'menu.name': 'text' });
 
 module.exports = mongoose.model('Restaurant', restaurantSchema);

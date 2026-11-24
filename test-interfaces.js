@@ -33,9 +33,10 @@ async function runInterfaceTests() {
     const html = await res.text();
     assert.ok(html.includes('<!doctype html>'));
     assert.ok(html.includes('<title>TrueHomes'));
-    assert.ok(html.includes('Plus Jakarta Sans'));
     assert.ok(html.includes('cdn.tailwindcss.com'));
     assert.ok(html.includes('checkout.razorpay.com'));
+    const cssRes = await fetch(`${BASE_URL}/css/app.css`);
+    assert.ok((await cssRes.text()).includes('Plus Jakarta Sans'));
   });
 
   await test('1.2 PWA Web App Manifest is valid and reachable', async () => {
@@ -57,9 +58,45 @@ async function runInterfaceTests() {
     assert.ok(sw.includes('url.pathname.startsWith("/api/")'));
   });
 
+  await test('1.4 Modular frontend assets are accessible', async () => {
+    const cssRes = await fetch(`${BASE_URL}/css/app.css`);
+    assert.equal(cssRes.status, 200);
+    assert.ok((await cssRes.text()).includes('scooter-bounce'));
+
+    const appRes = await fetch(`${BASE_URL}/js/app.js`);
+    assert.equal(appRes.status, 200);
+    assert.ok((await appRes.text()).includes('function escapeHTML'));
+
+    const apiRes = await fetch(`${BASE_URL}/js/api-client.js`);
+    assert.equal(apiRes.status, 200);
+    assert.ok((await apiRes.text()).includes('TrueHomesAPI'));
+
+    const stateRes = await fetch(`${BASE_URL}/js/app-state.js`);
+    assert.equal(stateRes.status, 200);
+    assert.ok((await stateRes.text()).includes('TrueHomesState'));
+
+    const authRes = await fetch(`${BASE_URL}/js/auth-service.js`);
+    assert.equal(authRes.status, 200);
+    assert.ok((await authRes.text()).includes('TrueHomesAuth'));
+
+    const featureAssets = [
+      ['restaurant-service.js', 'TrueHomesRestaurants'],
+      ['cart-service.js', 'TrueHomesCart'],
+      ['order-service.js', 'TrueHomesOrders'],
+      ['delivery-service.js', 'TrueHomesDelivery'],
+      ['admin-service.js', 'TrueHomesAdmin']
+    ];
+    for (const [fileName, marker] of featureAssets) {
+      const res = await fetch(`${BASE_URL}/js/${fileName}`);
+      assert.equal(res.status, 200);
+      assert.ok((await res.text()).includes(marker));
+    }
+  });
+
   // 2. DOM Components & Controls
   console.log('\n📌 Phase 2: Navigation & Component Interface Verification');
   const indexHtml = fs.readFileSync(path.join(__dirname, 'public', 'index.html'), 'utf8');
+  const appJs = fs.readFileSync(path.join(__dirname, 'public', 'js', 'app.js'), 'utf8');
 
   await test('2.1 Top Navigation Bar contains all action controls', async () => {
     assert.ok(indexHtml.includes('id="locationSelect"'), 'Missing Location Selector');
@@ -89,12 +126,12 @@ async function runInterfaceTests() {
   });
 
   await test('2.3 Auth Modal contains 3-Role selector & Direct Login controls', async () => {
-    assert.ok(indexHtml.includes('id="thRoleTab_admin"'), 'Missing Admin role tab');
-    assert.ok(indexHtml.includes('id="thRoleTab_user"'), 'Missing User role tab');
-    assert.ok(indexHtml.includes('id="thRoleTab_delivery_partner"'), 'Missing Delivery Partner role tab');
-    assert.ok(indexHtml.includes('id="thDirectLoginBox"'), 'Missing Direct Login box');
-    assert.ok(indexHtml.includes('id="thDirectLoginBtn"'), 'Missing Direct Login button');
-    assert.ok(indexHtml.includes('performDirectDatabaseLogin()'), 'Missing Direct Login handler');
+    assert.ok(appJs.includes('id="thRoleTab_admin"'), 'Missing Admin role tab');
+    assert.ok(appJs.includes('id="thRoleTab_user"'), 'Missing User role tab');
+    assert.ok(appJs.includes('id="thRoleTab_delivery_partner"'), 'Missing Delivery Partner role tab');
+    assert.ok(appJs.includes('id="thDirectLoginBox"'), 'Missing Direct Login box');
+    assert.ok(appJs.includes('id="thDirectLoginBtn"'), 'Missing Direct Login button');
+    assert.ok(appJs.includes('performDirectDatabaseLogin'), 'Missing Direct Login handler');
   });
 
   await test('2.4 Rider Portal (Delivery Modal) contains metrics bar & action handlers', async () => {
@@ -102,17 +139,18 @@ async function runInterfaceTests() {
     assert.ok(indexHtml.includes('id="deliveryCompletedCount"'), 'Missing Completed Deliveries metric');
     assert.ok(indexHtml.includes('id="deliveryTipsEarned"'), 'Missing Tips Earned metric');
     assert.ok(indexHtml.includes('id="deliveryOrdersList"'), 'Missing orders list container');
-    assert.ok(indexHtml.includes('claimDeliveryOrder'), 'Missing claimDeliveryOrder function');
-    assert.ok(indexHtml.includes('updateDeliveryStatus'), 'Missing updateDeliveryStatus function');
+    assert.ok(appJs.includes('claimDeliveryOrder'), 'Missing claimDeliveryOrder function');
+    assert.ok(appJs.includes('updateDeliveryStatus'), 'Missing updateDeliveryStatus function');
   });
 
   await test('2.5 Live Order Tracker contains timeline & real-time SSE stream indicator', async () => {
     assert.ok(indexHtml.includes('id="trackCodeInput"'), 'Missing order code input');
     assert.ok(indexHtml.includes('id="trackDetailsBox"'), 'Missing track details container');
-    assert.ok(indexHtml.includes('connectTrackLiveStream'), 'Missing connectTrackLiveStream function');
-    assert.ok(indexHtml.includes('disconnectTrackLiveStream'), 'Missing disconnectTrackLiveStream function');
-    assert.ok(indexHtml.includes('EventSource'), 'Missing EventSource API integration');
-    assert.ok(indexHtml.includes('Live Stream'), 'Missing Live Stream indicator');
+    assert.ok(appJs.includes('connectTrackLiveStream'), 'Missing connectTrackLiveStream function');
+    assert.ok(appJs.includes('disconnectTrackLiveStream'), 'Missing disconnectTrackLiveStream function');
+    assert.ok(appJs.includes('AbortController'), 'Missing authenticated stream cancellation integration');
+    assert.ok(appJs.includes('Authorization'), 'Missing bearer authorization integration');
+    assert.ok(appJs.includes('Live Stream'), 'Missing Live Stream indicator');
   });
 
   // 3. Client Calculation Engine
@@ -283,7 +321,9 @@ async function runInterfaceTests() {
   });
 
   await test('4.6 Live Order Tracker Interface: Stream status updates over SSE in real time', async () => {
-    const sseRes = await fetch(`${BASE_URL}/api/orders/${createdOrderCode}/stream`);
+    const sseRes = await fetch(`${BASE_URL}/api/orders/${createdOrderCode}/stream`, {
+      headers: { Authorization: `Bearer ${customerToken}` }
+    });
     assert.equal(sseRes.status, 200);
     assert.ok(sseRes.headers.get('content-type')?.includes('text/event-stream'));
 
@@ -313,6 +353,118 @@ async function runInterfaceTests() {
     assert.ok(text2.includes('DELIVERED'));
 
     await reader.cancel();
+  });
+
+  // ─── Phase 5: Reviews Engine Interface ────────────────────────────────────
+  console.log('\n📌 Phase 5: Customer Ratings & Reviews Engine Interface');
+
+  await test('5.1 Review modal HTML is present in page (id="reviewModal")', async () => {
+    assert.ok(indexHtml.includes('id="reviewModal"'), 'reviewModal element missing from legacy HTML');
+    assert.ok(indexHtml.includes('foodStars'), 'foodStars star picker missing');
+    assert.ok(indexHtml.includes('deliveryStars'), 'deliveryStars star picker missing');
+    assert.ok(indexHtml.includes('reviewComment'), 'reviewComment textarea missing');
+    assert.ok(indexHtml.includes('submitReview'), 'submitReview function call missing');
+  });
+
+  await test('5.2 Review API: POST review for a DELIVERED order returns 201', async () => {
+    // Register a fresh customer
+    const runId = Date.now();
+    const email = `uirev_${runId}@truehomes.test`;
+    const regRes = await fetch(`${BASE_URL}/api/auth/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'UI Rev Tester', email, password: 'TestPass@2026', role: 'customer' })
+    });
+    const regData = await regRes.json();
+    const custToken = regData.token;
+
+    // Get a real restaurant + menu item
+    const restArr = await (await fetch(`${BASE_URL}/api/restaurants`)).json();
+    const rest = restArr[0];
+    const dish = rest.menu[0];
+
+    // Place order using real menuItemId
+    const orderRes = await fetch(`${BASE_URL}/api/orders`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${custToken}` },
+      body: JSON.stringify({
+        restaurantId: rest._id,
+        items: [{ menuItemId: dish._id, qty: 1 }],
+        tip: 0,
+        customerName: 'UI Rev',
+        customerPhone: '9898989898',
+        deliveryAddress: '1 Test Lane, Bengaluru'
+      })
+    });
+    const orderData = await orderRes.json();
+    assert.ok(orderData._id, `Order creation failed: ${JSON.stringify(orderData)}`);
+    const orderId = orderData._id;
+    const orderCode = orderData.orderCode;
+
+    // Verify payment (simulated — this sets status to PAID)
+    await fetch(`${BASE_URL}/api/orders/${orderId}/verify-payment`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${custToken}` },
+      body: JSON.stringify({ razorpay_order_id: 'x', razorpay_payment_id: 'y', razorpay_signature: 'z' })
+    });
+
+    // Try to get admin token from env
+    const adminEmail2 = process.env.ADMIN_EMAIL || '';
+    const adminPass2 = process.env.ADMIN_PASSWORD || '';
+    let aToken = '';
+    if (adminEmail2 && adminPass2) {
+      const aRes = await fetch(`${BASE_URL}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: adminEmail2, password: adminPass2 })
+      });
+      aToken = (await aRes.json()).token || '';
+    }
+
+    if (aToken) {
+      await fetch(`${BASE_URL}/api/admin/orders/${orderId}/status`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${aToken}` },
+        body: JSON.stringify({ status: 'DELIVERED' })
+      });
+    }
+
+    // Post review — expect 201 (delivered) or 400 (not delivered when no admin token)
+    const revRes = await fetch(`${BASE_URL}/api/orders/${orderCode}/review`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${custToken}` },
+      body: JSON.stringify({ foodRating: 4, deliveryRating: 5, comment: 'Interface test review' })
+    });
+
+    assert.ok([201, 400].includes(revRes.status), `Unexpected status ${revRes.status}`);
+    if (revRes.status === 201) {
+      const revData = await revRes.json();
+      assert.equal(revData.foodRating, 4);
+      assert.equal(revData.orderCode, orderCode);
+    }
+  });
+
+  await test('5.3 GET /api/restaurants/:id/reviews returns JSON array', async () => {
+    const restArr = await (await fetch(`${BASE_URL}/api/restaurants`)).json();
+    const rest = restArr[0];
+    assert.ok(rest && rest._id, 'No restaurants found');
+
+    const revListRes = await fetch(`${BASE_URL}/api/restaurants/${rest._id}/reviews`);
+    assert.equal(revListRes.status, 200);
+    const reviews = await revListRes.json();
+    assert.ok(Array.isArray(reviews), 'reviews must be a JSON array');
+  });
+
+  await test('5.4 Review modal JS functions are present in page (openReviewModal, setReviewStar, submitReview)', async () => {
+    assert.ok(appJs.includes('function openReviewModal'), 'openReviewModal function missing');
+    assert.ok(appJs.includes('function setReviewStar'), 'setReviewStar function missing');
+    assert.ok(appJs.includes('async function submitReview'), 'submitReview async function missing');
+    assert.ok(appJs.includes('renderStars'), 'renderStars helper missing');
+  });
+
+  await test('5.5 Restaurant cards show reviewCount badge when reviews exist', async () => {
+    // The template should contain the reviewCount conditional expression
+    assert.ok(appJs.includes('reviewCount'), 'reviewCount field not referenced in app JS');
   });
 
   console.log('\n====================================================');

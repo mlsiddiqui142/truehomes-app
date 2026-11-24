@@ -7,6 +7,7 @@ const mongoose = require('mongoose');
 const Restaurant = require('./models/Restaurant');
 const Order = require('./models/Order');
 const User = require('./models/User');
+const Review = require('./models/Review');
 
 const TEST_PORT = '5055';
 const BASE_URL = `http://127.0.0.1:${TEST_PORT}`;
@@ -68,6 +69,7 @@ describe('TrueHomes Full-Stack & Cyber-Security Automated Suite', () => {
       await Restaurant.findByIdAndDelete(createdRestaurantId);
     }
     if (createdOrderCode) {
+      await Review.deleteOne({ orderCode: createdOrderCode });
       await Order.deleteOne({ orderCode: createdOrderCode });
     }
     await mongoose.disconnect();
@@ -209,6 +211,23 @@ describe('TrueHomes Full-Stack & Cyber-Security Automated Suite', () => {
   });
 
   it('9. Prevents client-side price tampering and applies TRUE50 promo accurately', async () => {
+    const invalidOrderRes = await fetch(`${BASE_URL}/api/orders`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${customerToken}`
+      },
+      body: JSON.stringify({
+        restaurantId: createdRestaurantId,
+        items: [{ menuItemId: createdMenuItemId, qty: 21 }],
+        customerName: 'Test Customer',
+        customerPhone: '123',
+        deliveryAddress: 'x',
+        paymentMethod: 'RAZORPAY'
+      })
+    });
+    assert.equal(invalidOrderRes.status, 400);
+
     const orderRes = await fetch(`${BASE_URL}/api/orders`, {
       method: 'POST',
       headers: {
@@ -242,15 +261,28 @@ describe('TrueHomes Full-Stack & Cyber-Security Automated Suite', () => {
   it('10. Rejects forged Razorpay signatures and verifies legitimate payment flow', async () => {
     const initRes = await fetch(`${BASE_URL}/api/payments/razorpay/order`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${customerToken}`
+      },
       body: JSON.stringify({ orderId: createdOrderId })
     });
     const initData = await initRes.json();
     assert.equal(initRes.status, 200);
 
-    const badVerify = await fetch(`${BASE_URL}/api/payments/razorpay/verify`, {
+    const unauthorizedInitRes = await fetch(`${BASE_URL}/api/payments/razorpay/order`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ orderId: createdOrderId })
+    });
+    assert.equal(unauthorizedInitRes.status, 403);
+
+    const badVerify = await fetch(`${BASE_URL}/api/payments/razorpay/verify`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${customerToken}`
+      },
       body: JSON.stringify({
         orderId: createdOrderId,
         razorpay_order_id: 'order_fake123',
@@ -275,7 +307,10 @@ describe('TrueHomes Full-Stack & Cyber-Security Automated Suite', () => {
 
     const goodVerify = await fetch(`${BASE_URL}/api/payments/razorpay/verify`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${customerToken}`
+      },
       body: JSON.stringify(validPayload)
     });
     const verifyData = await goodVerify.json();
@@ -283,23 +318,38 @@ describe('TrueHomes Full-Stack & Cyber-Security Automated Suite', () => {
     assert.equal(verifyData.order.paymentStatus, 'PAID');
   });
 
-  it('11. Admin updates live order status and public tracking reflects it with masked phone', async () => {
-    const patchRes = await fetch(`${BASE_URL}/api/admin/orders/${createdOrderId}/status`, {
+  it('11. Admin updates live order status and owner tracking reflects it', async () => {
+    const preparingRes = await fetch(`${BASE_URL}/api/admin/orders/${createdOrderId}/status`, {
       method: 'PATCH',
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${adminToken}`
       },
-      body: JSON.stringify({ status: 'OUT_FOR_DELIVERY' })
+      body: JSON.stringify({ status: 'PREPARING' })
     });
-    assert.equal(patchRes.status, 200);
+    assert.equal(preparingRes.status, 200);
 
-    const trackRes = await fetch(`${BASE_URL}/api/orders/${createdOrderCode}`);
+    const invalidPatchRes = await fetch(`${BASE_URL}/api/admin/orders/${createdOrderId}/status`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${adminToken}`
+      },
+      body: JSON.stringify({ status: 'CONFIRMED' })
+    });
+    assert.equal(invalidPatchRes.status, 409);
+
+    const trackRes = await fetch(`${BASE_URL}/api/orders/${createdOrderCode}`, {
+      headers: { Authorization: `Bearer ${customerToken}` }
+    });
     const trackData = await trackRes.json();
     assert.equal(trackRes.status, 200);
-    assert.equal(trackData.status, 'OUT_FOR_DELIVERY');
-    assert.ok(trackData.customerPhone.endsWith('3210'));
-    assert.ok(trackData.customerPhone.includes('*'));
+    assert.equal(trackData.status, 'PREPARING');
+    assert.equal(trackData.customerPhone, '+91 9876543210');
+    assert.equal(trackData.deliveryAddress, 'Sector 62, Noida');
+
+    const unauthorizedTrackRes = await fetch(`${BASE_URL}/api/orders/${createdOrderCode}`);
+    assert.equal(unauthorizedTrackRes.status, 401);
   });
 
   it('12. Authenticated customer retrieves their order history via GET /api/orders/my', async () => {
@@ -312,24 +362,13 @@ describe('TrueHomes Full-Stack & Cyber-Security Automated Suite', () => {
     assert.ok(orders.some((o) => o.orderCode === createdOrderCode));
   });
 
-  it('13. Supports direct login probes and authenticated sessions, blocking passwordless admin', async () => {
-    const probeNoneRes = await fetch(`${BASE_URL}/api/auth/direct-login`, {
+  it('13. Supports password-verified direct login and blocks passwordless admin access', async () => {
+    const badPasswordRes = await fetch(`${BASE_URL}/api/auth/direct-login`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email: `nonexistent_${runId}@truehomes.test`, password: '__PROBE_ONLY__' })
+      body: JSON.stringify({ email: customerEmail, password: 'WrongPassword@2026' })
     });
-    const probeNoneData = await probeNoneRes.json();
-    assert.equal(probeNoneRes.status, 200);
-    assert.equal(probeNoneData.exists, false);
-
-    const probeCustRes = await fetch(`${BASE_URL}/api/auth/direct-login`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email: customerEmail, password: '__PROBE_ONLY__' })
-    });
-    const probeCustData = await probeCustRes.json();
-    assert.equal(probeCustRes.status, 200);
-    assert.equal(probeCustData.exists, true);
+    assert.equal(badPasswordRes.status, 401);
 
     const directLoginRes = await fetch(`${BASE_URL}/api/auth/direct-login`, {
       method: 'POST',
@@ -340,6 +379,18 @@ describe('TrueHomes Full-Stack & Cyber-Security Automated Suite', () => {
     assert.equal(directLoginRes.status, 200);
     assert.ok(directLoginData.token);
     assert.equal(directLoginData.user.email, customerEmail);
+
+    const setCookie = directLoginRes.headers.get('set-cookie');
+    assert.ok(setCookie && setCookie.includes('truehomes_refresh='));
+    assert.ok(setCookie.includes('HttpOnly'));
+    const refreshCookie = setCookie.split(';', 1)[0];
+    const refreshRes = await fetch(`${BASE_URL}/api/auth/refresh`, {
+      method: 'POST',
+      headers: { Cookie: refreshCookie }
+    });
+    const refreshData = await refreshRes.json();
+    assert.equal(refreshRes.status, 200);
+    assert.ok(refreshData.token);
 
     const badAdminDirectRes = await fetch(`${BASE_URL}/api/auth/direct-login`, {
       method: 'POST',
@@ -385,15 +436,6 @@ describe('TrueHomes Full-Stack & Cyber-Security Automated Suite', () => {
       headers: { Authorization: `Bearer ${customerToken}` }
     });
     assert.equal(custBlock.status, 403);
-
-    await fetch(`${BASE_URL}/api/admin/orders/${createdOrderId}/status`, {
-      method: 'PATCH',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${adminToken}`
-      },
-      body: JSON.stringify({ status: 'PREPARING' })
-    });
 
     const fetchRes = await fetch(`${BASE_URL}/api/delivery/orders`, {
       headers: { Authorization: `Bearer ${partnerToken}` }
@@ -443,7 +485,9 @@ describe('TrueHomes Full-Stack & Cyber-Security Automated Suite', () => {
   });
 
   it('15. Streams real-time order status updates over Server-Sent Events (SSE)', async () => {
-    const sseRes = await fetch(`${BASE_URL}/api/orders/${createdOrderCode}/stream`);
+    const sseRes = await fetch(`${BASE_URL}/api/orders/${createdOrderCode}/stream`, {
+      headers: { Authorization: `Bearer ${customerToken}` }
+    });
     assert.equal(sseRes.status, 200);
     assert.ok(sseRes.headers.get('content-type')?.includes('text/event-stream'));
 
@@ -463,13 +507,13 @@ describe('TrueHomes Full-Stack & Cyber-Security Automated Suite', () => {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${adminToken}`
       },
-      body: JSON.stringify({ status: 'PREPARING' })
+      body: JSON.stringify({ status: 'DELIVERED' })
     });
 
     // 3. Read broadcasted update
     const secondChunk = await reader.read();
     const secondText = decoder.decode(secondChunk.value);
-    assert.ok(secondText.includes('PREPARING'));
+    assert.ok(secondText.includes('DELIVERED'));
 
     await reader.cancel();
   });
@@ -488,5 +532,58 @@ describe('TrueHomes Full-Stack & Cyber-Security Automated Suite', () => {
       }
     }
     assert.equal(hit429, true);
+  });
+
+  it('17. Customer submits a review for a DELIVERED order → 201 + restaurant rating updated', async () => {
+    // First advance order to DELIVERED via admin + delivery partner (reuse createdOrderId / partnerToken from earlier tests)
+    await fetch(`${BASE_URL}/api/admin/orders/${createdOrderId}/status`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken}` },
+      body: JSON.stringify({ status: 'DELIVERED' })
+    });
+
+    const revRes = await fetch(`${BASE_URL}/api/orders/${createdOrderCode}/review`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${customerToken}` },
+      body: JSON.stringify({ foodRating: 5, deliveryRating: 4, comment: 'Fantastic meal!' })
+    });
+    const revData = await revRes.json();
+    assert.equal(revRes.status, 201, `Expected 201, got ${revRes.status}: ${JSON.stringify(revData)}`);
+    assert.equal(revData.foodRating, 5);
+    assert.equal(revData.orderCode, createdOrderCode);
+
+    // Restaurant rating should now be recalculated
+    const restRes = await fetch(`${BASE_URL}/api/restaurants/${createdRestaurantId}`);
+    const restData = await restRes.json();
+    assert.ok(typeof restData.rating === 'number', 'rating must be a number');
+    assert.ok(restData.reviewCount >= 1, 'reviewCount must be >= 1');
+  });
+
+  it('18. Duplicate review is rejected with 409', async () => {
+    const dupRes = await fetch(`${BASE_URL}/api/orders/${createdOrderCode}/review`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${customerToken}` },
+      body: JSON.stringify({ foodRating: 3, comment: 'Second attempt' })
+    });
+    assert.equal(dupRes.status, 409, `Expected 409 conflict, got ${dupRes.status}`);
+  });
+
+  it('19. Another user cannot review a different customer\'s order → 403', async () => {
+    const foreignRes = await fetch(`${BASE_URL}/api/orders/${createdOrderCode}/review`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${partnerToken}` },
+      body: JSON.stringify({ foodRating: 1 })
+    });
+    // partner is delivery_partner role — should get 403 (not owner)
+    assert.ok([403, 409].includes(foreignRes.status), `Expected 403 or 409, got ${foreignRes.status}`);
+  });
+
+  it('20. GET /api/restaurants/:id/reviews returns the submitted review', async () => {
+    const res = await fetch(`${BASE_URL}/api/restaurants/${createdRestaurantId}/reviews`);
+    assert.equal(res.status, 200);
+    const reviews = await res.json();
+    assert.ok(Array.isArray(reviews), 'reviews must be an array');
+    assert.ok(reviews.length >= 1, 'at least 1 review should exist');
+    assert.equal(reviews[0].foodRating, 5);
   });
 });

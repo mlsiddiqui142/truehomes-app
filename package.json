@@ -5,10 +5,13 @@
   "scripts": {
     "start": "node server.js",
     "seed": "node seed.js",
+    "dev": "vite",
+    "build": "vite build",
     "test": "node --test test.js",
     "test:ui": "node test-interfaces.js"
   },
   "dependencies": {
+    "@vitejs/plugin-react": "^6.3.0",
     "bcryptjs": "^2.4.3",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
@@ -16,6 +19,9 @@
     "express-rate-limit": "^7.4.0",
     "helmet": "^7.1.0",
     "jsonwebtoken": "^9.0.2",
-    "mongoose": "^8.4.0"
+    "mongoose": "^8.4.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "vite": "^8.3.8"
   }
 }
