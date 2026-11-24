@@ -175,6 +175,7 @@ function App() {
   const [selectedAddress, setSelectedAddress] = useState("Indirapuram, Ghaziabad");
   const [newAddressInput, setNewAddressInput] = useState("");
   const [paymentMethod, setPaymentMethod] = useState("COD");
+  const [invoiceOrder, setInvoiceOrder] = useState(null);
   const [favorites, setFavorites] = useState(() => {
     try {
       return new Set(JSON.parse(localStorage.getItem("truehomes_favs") || "[]"));
@@ -559,6 +560,26 @@ function App() {
         },
       ];
     });
+  }
+
+  function updateCartItemQty(dishId, delta) {
+    setCart((current) => {
+      return current
+        .map((item) => {
+          if (item._id === dishId) {
+            const nextQty = item.qty + delta;
+            return nextQty > 0 ? { ...item, qty: nextQty } : null;
+          }
+          return item;
+        })
+        .filter(Boolean);
+    });
+  }
+
+  function clearCart() {
+    setCart([]);
+    setAppliedCoupon(null);
+    setRiderTip(0);
   }
 
   async function login(event) {
@@ -1094,13 +1115,48 @@ function App() {
       {cartOpen && (
         <aside className="drawer">
           <button className="close" onClick={() => setCartOpen(false)}>×</button>
-          <h2>Your cart</h2>
-          {cart.map((item) => (
-            <div className="cart-row" key={item._id}>
-              <span>{item.name}<small>Qty {item.qty}</small></span>
-              <b>₹{item.price * item.qty}</b>
-            </div>
-          ))}
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+            <h2 style={{ margin: 0 }}>Your cart</h2>
+            {cart.length > 0 && (
+              <button
+                type="button"
+                onClick={clearCart}
+                style={{ background: "none", border: "none", color: "#ef4444", fontSize: 11, fontWeight: 700, cursor: "pointer" }}
+              >
+                Clear Cart
+              </button>
+            )}
+          </div>
+          {cart.length === 0 ? (
+            <p className="muted" style={{ padding: "40px 0", textAlign: "center" }}>Your cart is empty.</p>
+          ) : (
+            cart.map((item) => (
+              <div className="cart-row" key={item._id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <div>
+                  <span style={{ display: "block", fontWeight: 700 }}>{item.name}</span>
+                  <small style={{ color: "#64748b" }}>₹{item.price} each</small>
+                </div>
+                <div className="cart-row-controls">
+                  <button
+                    type="button"
+                    className="cart-qty-btn"
+                    onClick={() => updateCartItemQty(item._id, -1)}
+                  >
+                    -
+                  </button>
+                  <span className="cart-qty-count">{item.qty}</span>
+                  <button
+                    type="button"
+                    className="cart-qty-btn"
+                    onClick={() => updateCartItemQty(item._id, 1)}
+                  >
+                    +
+                  </button>
+                  <b style={{ minWidth: 50, textAlign: "right" }}>₹{item.price * item.qty}</b>
+                </div>
+              </div>
+            ))
+          )}
 
           {/* Promo code input & applied pill */}
           {appliedCoupon ? (
@@ -1554,13 +1610,20 @@ function App() {
                     <p><b>Restaurant:</b> {order.restaurantName}</p>
                     <p><b>Address:</b> {order.deliveryAddress}</p>
                     <p><b>Delivery partner:</b> {order.assignedPartnerName || "Waiting for a partner"}</p>
-                    <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                    <div style={{ display: "flex", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
                       <button
                         type="button"
                         className="partner-action secondary"
                         onClick={() => reorderItems(order)}
                       >
                         ↻ Reorder Items
+                      </button>
+                      <button
+                        type="button"
+                        className="partner-action secondary"
+                        onClick={() => setInvoiceOrder(order)}
+                      >
+                        📄 Receipt / Invoice
                       </button>
                       {order.status === "DELIVERED" && !reviewedOrders.has(order.orderCode) && (
                         <button
@@ -1818,6 +1881,101 @@ function App() {
           </section>
         </div>
       )}
+      {/* Invoice / Tax Receipt Modal */}
+      {invoiceOrder && (
+        <div className="modal-backdrop" onMouseDown={() => setInvoiceOrder(null)}>
+          <section
+            className="invoice-modal"
+            onMouseDown={(e) => e.stopPropagation()}
+          >
+            <div className="no-print" style={{ display: "flex", justifyContent: "flex-end" }}>
+              <button type="button" className="close" onClick={() => setInvoiceOrder(null)}>×</button>
+            </div>
+            <div className="invoice-header">
+              <div className="invoice-brand">True<span>Homes</span></div>
+              <p style={{ fontSize: 13, fontWeight: 700, margin: "2px 0", color: "#1e293b" }}>Tax Invoice / Order Receipt</p>
+              <div className="invoice-meta">
+                <span>Order: <b>{invoiceOrder.orderCode}</b></span> · <span>Date: {new Date(invoiceOrder.createdAt || Date.now()).toLocaleDateString()}</span>
+              </div>
+            </div>
+
+            <div style={{ fontSize: 11, color: "#64748b", margin: "8px 0" }}>
+              <div><b>Kitchen:</b> {invoiceOrder.restaurantName}</div>
+              <div><b>Delivered to:</b> {invoiceOrder.customerName || user?.name} · {invoiceOrder.deliveryAddress}</div>
+              <div><b>Payment:</b> {invoiceOrder.paymentMethod} ({invoiceOrder.paymentStatus})</div>
+            </div>
+
+            <table className="invoice-table">
+              <thead>
+                <tr>
+                  <th>Item</th>
+                  <th style={{ textAlign: "center" }}>Qty</th>
+                  <th style={{ textAlign: "right" }}>Price</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(invoiceOrder.items || []).map((it, idx) => (
+                  <tr key={idx}>
+                    <td>{it.name}</td>
+                    <td style={{ textAlign: "center" }}>{it.qty}</td>
+                    <td style={{ textAlign: "right" }}>₹{(it.unitPrice || 0) * (it.qty || 1)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+
+            <div style={{ marginTop: 12 }}>
+              <div className="invoice-breakdown-row">
+                <span>Items Subtotal</span>
+                <span>₹{invoiceOrder.itemTotal || invoiceOrder.grandTotal}</span>
+              </div>
+              {invoiceOrder.discount > 0 && (
+                <div className="invoice-breakdown-row" style={{ color: "#059669" }}>
+                  <span>Discount</span>
+                  <span>-₹{invoiceOrder.discount}</span>
+                </div>
+              )}
+              <div className="invoice-breakdown-row">
+                <span>Delivery Fee</span>
+                <span>₹{invoiceOrder.deliveryFee || 0}</span>
+              </div>
+              <div className="invoice-breakdown-row">
+                <span>GST (5% Taxes)</span>
+                <span>₹{invoiceOrder.tax || Math.round((invoiceOrder.itemTotal || 0) * 0.05)}</span>
+              </div>
+              {invoiceOrder.tip > 0 && (
+                <div className="invoice-breakdown-row" style={{ color: "#ea580c" }}>
+                  <span>Rider Tip</span>
+                  <span>₹{invoiceOrder.tip}</span>
+                </div>
+              )}
+              <div className="invoice-total-row">
+                <span>Total Paid</span>
+                <span>₹{invoiceOrder.grandTotal}</span>
+              </div>
+            </div>
+
+            <div className="no-print" style={{ display: "flex", gap: 10, marginTop: 20 }}>
+              <button
+                type="button"
+                className="partner-action"
+                style={{ flex: 1 }}
+                onClick={() => window.print()}
+              >
+                🖨️ Print / Save Receipt
+              </button>
+              <button
+                type="button"
+                className="partner-action secondary"
+                onClick={() => setInvoiceOrder(null)}
+              >
+                Close
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
+
       {reviewModalOrder && (
         <div className="modal-backdrop" onMouseDown={() => setReviewModalOrder(null)}>
           <form
