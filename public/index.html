@@ -2475,6 +2475,307 @@ function stopTrackAutoPoll() {
     TH_TRACK_POLL_TIMER = null;
   }
 }
+
+/* TH_BULK_MENU_BUILDER */
+const TH_DISH_TEMPLATES = [
+  {
+    id: 'thali',
+    label: '🍱 Homestyle Thali',
+    name: 'Special Ghar Ki Thali',
+    price: 189,
+    category: 'Thalis',
+    isVeg: true,
+    description: 'Dal tadka, seasonal sabzi, 4 phulkas, jeera rice, salad & pickle.',
+    image: 'https://images.unsplash.com/photo-1546833999-b9f581a1996d?w=600&q=80'
+  },
+  {
+    id: 'biryani',
+    label: '🍲 Dum Biryani',
+    name: 'Hyderabadi Subz Dum Biryani',
+    price: 229,
+    category: 'Biryani',
+    isVeg: true,
+    description: 'Slow-cooked saffron basmati rice layered with aromatic spices, served with raita.',
+    image: 'https://images.unsplash.com/photo-1563379091339-03b21ab4a4f8?w=600&q=80'
+  },
+  {
+    id: 'curry',
+    label: '🍛 North Indian Curry',
+    name: 'Paneer Butter Masala',
+    price: 210,
+    category: 'Main Course',
+    isVeg: true,
+    description: 'Soft cottage cheese cubes simmered in rich tomato-cashew makhani gravy.',
+    image: 'https://images.unsplash.com/photo-1631452180519-c014fe946bc7?w=600&q=80'
+  },
+  {
+    id: 'nonveg',
+    label: '🍗 Chicken Special',
+    name: 'Homestyle Chicken Curry',
+    price: 259,
+    category: 'Main Course',
+    isVeg: false,
+    description: 'Tender chicken cooked in slow-roasted onion, ginger-garlic & whole garam masala gravy.',
+    image: 'https://images.unsplash.com/photo-1603894584373-5ac82b2ae398?w=600&q=80'
+  },
+  {
+    id: 'snack',
+    label: '🥟 Street Snack / Starter',
+    name: 'Crispy Paneer Tikka',
+    price: 179,
+    category: 'Starters',
+    isVeg: true,
+    description: 'Char-grilled spiced paneer & bell peppers served with mint chutney.',
+    image: 'https://images.unsplash.com/photo-1567188040759-fb8a883dc6d8?w=600&q=80'
+  },
+  {
+    id: 'dessert',
+    label: '🍨 Dessert / Beverage',
+    name: 'Kesari Rasmalai (2 Pcs)',
+    price: 99,
+    category: 'Desserts',
+    isVeg: true,
+    description: 'Chilled saffron-cardamom milk dumplings garnished with pistachios.',
+    image: 'https://images.unsplash.com/photo-1601050690597-df0568f70950?w=600&q=80'
+  }
+];
+
+let thBulkRows = [];
+
+function createRowFromTemplate(tplId = 'thali') {
+  const tpl = TH_DISH_TEMPLATES.find((t) => t.id === tplId) || TH_DISH_TEMPLATES[0];
+  return {
+    uid: 'row_' + Math.random().toString(36).slice(2, 9),
+    templateId: tpl.id,
+    name: tpl.name,
+    price: tpl.price,
+    category: tpl.category,
+    isVeg: tpl.isVeg,
+    description: tpl.description,
+    image: tpl.image
+  };
+}
+
+function addBulkMenuRows(count = 1, tplId = 'thali') {
+  const n = Math.min(Math.max(Number(count) || 1, 1), 25);
+  for (let i = 0; i < n; i++) thBulkRows.push(createRowFromTemplate(tplId));
+  renderBulkMenuRows();
+}
+
+function applyTemplateToRow(uid, tplId) {
+  const idx = thBulkRows.findIndex((r) => r.uid === uid);
+  if (idx === -1) return;
+  const fresh = createRowFromTemplate(tplId);
+  fresh.uid = uid;
+  thBulkRows[idx] = fresh;
+  renderBulkMenuRows();
+}
+
+function updateBulkRowField(uid, field, value) {
+  const row = thBulkRows.find((r) => r.uid === uid);
+  if (!row) return;
+  row[field] = field === 'price' ? Number(value) || 0 : field === 'isVeg' ? Boolean(value) : value;
+}
+
+function removeBulkRow(uid) {
+  thBulkRows = thBulkRows.filter((r) => r.uid !== uid);
+  if (!thBulkRows.length) thBulkRows.push(createRowFromTemplate('thali'));
+  renderBulkMenuRows();
+}
+
+function renderBulkMenuRows() {
+  const container = document.getElementById('thBulkRowsList');
+  if (!container) return;
+  container.innerHTML = thBulkRows.map((row, idx) => `
+    <div class="p-3.5 rounded-2xl border border-slate-200 bg-slate-50/70 space-y-2.5">
+      <div class="flex flex-wrap items-center justify-between gap-2">
+        <div class="flex items-center gap-2">
+          <span class="px-2 py-0.5 rounded-md bg-slate-900 text-white text-[11px] font-bold">#${idx + 1}</span>
+          <select onchange="applyTemplateToRow('${row.uid}', this.value)" class="text-xs font-bold px-2.5 py-1.5 rounded-xl border border-slate-300 bg-white text-slate-800">
+            ${TH_DISH_TEMPLATES.map((t) => `<option value="${t.id}" ${t.id === row.templateId ? 'selected' : ''}>${t.label}</option>`).join('')}
+          </select>
+          <label class="inline-flex items-center gap-1.5 text-xs font-bold text-slate-700 cursor-pointer ml-1">
+            <input type="checkbox" ${row.isVeg ? 'checked' : ''} onchange="updateBulkRowField('${row.uid}', 'isVeg', this.checked)" class="rounded text-emerald-600" />
+            <span>Pure Veg</span>
+          </label>
+        </div>
+        <button type="button" onclick="removeBulkRow('${row.uid}')" class="text-xs font-bold text-rose-600 hover:text-rose-700 px-2 py-1">Remove</button>
+      </div>
+      <div class="grid grid-cols-1 sm:grid-cols-12 gap-2">
+        <input type="text" value="${String(row.name).replace(/"/g, '&quot;')}" oninput="updateBulkRowField('${row.uid}', 'name', this.value)" placeholder="Dish Name" class="sm:col-span-5 px-3 py-2 rounded-xl border border-slate-200 bg-white text-xs font-semibold" />
+        <input type="number" min="1" value="${row.price}" oninput="updateBulkRowField('${row.uid}', 'price', this.value)" placeholder="Price (₹)" class="sm:col-span-3 px-3 py-2 rounded-xl border border-slate-200 bg-white text-xs font-semibold" />
+        <input type="text" value="${String(row.category).replace(/"/g, '&quot;')}" oninput="updateBulkRowField('${row.uid}', 'category', this.value)" placeholder="Category" class="sm:col-span-4 px-3 py-2 rounded-xl border border-slate-200 bg-white text-xs font-semibold" />
+        <input type="text" value="${String(row.description).replace(/"/g, '&quot;')}" oninput="updateBulkRowField('${row.uid}', 'description', this.value)" placeholder="Short description" class="sm:col-span-7 px-3 py-2 rounded-xl border border-slate-200 bg-white text-xs" />
+        <input type="text" value="${String(row.image).replace(/"/g, '&quot;')}" oninput="updateBulkRowField('${row.uid}', 'image', this.value)" placeholder="Image URL" class="sm:col-span-5 px-3 py-2 rounded-xl border border-slate-200 bg-white text-xs" />
+      </div>
+    </div>
+  `).join('');
+}
+
+function refreshBulkKitchenSelect() {
+  const sel = document.getElementById('thBulkRestaurantSelect');
+  if (!sel || typeof state === 'undefined' || !Array.isArray(state.restaurants)) return;
+  const current = sel.value;
+  sel.innerHTML = state.restaurants.map((r) => `<option value="${r._id}">${r.name} (${(r.menu || []).length} items)</option>`).join('');
+  if (current && state.restaurants.some((r) => r._id === current)) sel.value = current;
+  renderAdminLiveMenuPreview();
+}
+
+function renderAdminLiveMenuPreview() {
+  const sel = document.getElementById('thBulkRestaurantSelect');
+  const box = document.getElementById('thAdminLiveMenuPreview');
+  if (!sel || !box || typeof state === 'undefined') return;
+  const rest = (state.restaurants || []).find((r) => r._id === sel.value);
+  if (!rest) {
+    box.innerHTML = '<p class="text-xs text-slate-400">Select a kitchen to view its active menu items.</p>';
+    return;
+  }
+  const items = rest.menu || [];
+  box.innerHTML = items.length
+    ? items.map((m) => `
+        <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold border ${m.isVeg ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-rose-50 text-rose-700 border-rose-200'}">
+          <span>${m.isVeg ? '🟢' : '🔴'}</span>
+          <span>${m.name}</span>
+          <span class="opacity-75">₹${m.price}</span>
+        </span>
+      `).join('')
+    : '<p class="text-xs text-slate-400">No dishes in this kitchen yet.</p>';
+}
+
+async function submitBulkMenuTemplates() {
+  const sel = document.getElementById('thBulkRestaurantSelect');
+  const restaurantId = sel ? sel.value : '';
+  if (!restaurantId) {
+    if (typeof showToast === 'function') showToast('Please select a target kitchen first');
+    return;
+  }
+  const validRows = thBulkRows.filter((r) => r.name && r.name.trim() && Number(r.price) > 0);
+  if (!validRows.length) {
+    if (typeof showToast === 'function') showToast('Add at least one dish with a valid name and price');
+    return;
+  }
+
+  const btn = document.getElementById('thBulkSaveBtn');
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'Saving ' + validRows.length + ' item(s)...';
+  }
+
+  let added = 0;
+  try {
+    for (const item of validRows) {
+      const res = await fetch('/api/restaurants/' + encodeURIComponent(restaurantId) + '/menu', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer ' + (state.token || '')
+        },
+        body: JSON.stringify({
+          name: item.name.trim(),
+          price: Number(item.price),
+          category: (item.category || 'Specials').trim(),
+          isVeg: Boolean(item.isVeg),
+          description: (item.description || '').trim(),
+          image: (item.image || '').trim()
+        })
+      });
+      if (res.ok) added++;
+    }
+
+    if (typeof fetchRestaurants === 'function') {
+      await fetchRestaurants();
+    } else if (typeof loadRestaurants === 'function') {
+      await loadRestaurants();
+    }
+
+    refreshBulkKitchenSelect();
+    thBulkRows = [createRowFromTemplate('thali')];
+    renderBulkMenuRows();
+
+    if (typeof showToast === 'function') {
+      showToast(`Added ${added} dish(es) to Admin & Storefront UI!`);
+    }
+  } catch (err) {
+    if (typeof showToast === 'function') showToast('Error saving batch items');
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = 'Publish All Items to Admin & Storefront';
+    }
+  }
+}
+
+function mountBulkMenuBuilder() {
+  const adminModal = document.getElementById('adminModal');
+  if (!adminModal || document.getElementById('thBulkMenuPanel')) return;
+
+  const targetContainer = adminModal.querySelector('.overflow-y-auto') || adminModal.querySelector('.p-6') || adminModal;
+  const panel = document.createElement('div');
+  panel.id = 'thBulkMenuPanel';
+  panel.className = 'mt-6 p-5 rounded-3xl border-2 border-orange-200 bg-white shadow-sm space-y-4';
+  panel.innerHTML = `
+    <div class="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 pb-3">
+      <div>
+        <span class="text-[11px] font-extrabold uppercase tracking-wider text-orange-600">Root Admin Quick Studio</span>
+        <h4 class="text-base font-extrabold text-slate-900">Bulk Add Dishes via Predefined Templates</h4>
+      </div>
+      <div class="flex flex-wrap items-center gap-1.5">
+        ${TH_DISH_TEMPLATES.map((t) => `
+          <button type="button" onclick="addBulkMenuRows(1, '${t.id}')" class="px-2.5 py-1 rounded-xl bg-orange-50 hover:bg-orange-100 text-orange-700 border border-orange-200 text-[11px] font-bold transition">
+            + ${t.label}
+          </button>
+        `).join('')}
+      </div>
+    </div>
+
+    <div class="grid grid-cols-1 sm:grid-cols-12 gap-3 items-end">
+      <div class="sm:col-span-6">
+        <label class="block text-xs font-bold text-slate-700 mb-1">Target Kitchen</label>
+        <select id="thBulkRestaurantSelect" onchange="renderAdminLiveMenuPreview()" class="w-full px-3 py-2.5 rounded-xl border border-slate-300 text-xs font-bold bg-white"></select>
+      </div>
+      <div class="sm:col-span-6 flex flex-wrap items-center gap-2">
+        <input id="thBulkCountInput" type="number" min="1" max="20" value="3" class="w-20 px-3 py-2.5 rounded-xl border border-slate-300 text-xs font-bold text-center" />
+        <button type="button" onclick="addBulkMenuRows(document.getElementById('thBulkCountInput').value)" class="px-3.5 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold">
+          + Add N Rows
+        </button>
+        <button type="button" onclick="thBulkRows=[createRowFromTemplate('thali')]; renderBulkMenuRows();" class="px-3 py-2.5 rounded-xl border border-slate-300 text-xs font-bold text-slate-600 hover:bg-slate-50">
+          Reset
+        </button>
+      </div>
+    </div>
+
+    <div id="thBulkRowsList" class="space-y-2.5 max-h-80 overflow-y-auto pr-1"></div>
+
+    <div class="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-slate-100">
+      <p class="text-[11px] text-slate-500">Items sync live to both this Admin menu view and the customer storefront.</p>
+      <button id="thBulkSaveBtn" type="button" onclick="submitBulkMenuTemplates()" class="px-5 py-2.5 rounded-xl bg-orange-600 hover:bg-orange-700 text-white text-xs font-extrabold shadow-sm">
+        Publish All Items to Admin & Storefront
+      </button>
+    </div>
+
+    <div class="pt-2 border-t border-slate-100">
+      <p class="text-[11px] font-bold text-slate-600 mb-2">Live Active Menu in Selected Kitchen (Synced with User UI):</p>
+      <div id="thAdminLiveMenuPreview" class="flex flex-wrap gap-1.5"></div>
+    </div>
+  `;
+
+  targetContainer.appendChild(panel);
+  if (!thBulkRows.length) thBulkRows = [createRowFromTemplate('thali')];
+  refreshBulkKitchenSelect();
+  renderBulkMenuRows();
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  setTimeout(mountBulkMenuBuilder, 300);
+});
+document.addEventListener('click', (e) => {
+  if (e.target && e.target.closest && e.target.closest('[onclick*="adminModal"]')) {
+    setTimeout(() => {
+      mountBulkMenuBuilder();
+      refreshBulkKitchenSelect();
+    }, 100);
+  }
+});
 </script>
     if ('serviceWorker' in navigator) { window.addEventListener('load', () => {
     navigator.serviceWorker.register('/service-worker.js').catch(() => {}); });
