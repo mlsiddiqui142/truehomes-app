@@ -9,6 +9,7 @@ const Order = require('./models/Order');
 const User = require('./models/User');
 const Review = require('./models/Review');
 const RefreshSession = require('./models/RefreshSession');
+const Coupon = require('./models/Coupon');
 
 const TEST_PORT = '5055';
 const BASE_URL = `http://127.0.0.1:${TEST_PORT}`;
@@ -85,6 +86,7 @@ describe('TrueHomes Full-Stack & Cyber-Security Automated Suite', () => {
     if (deliveryFixtureOrderCodes.length) {
       await Order.deleteMany({ orderCode: { $in: deliveryFixtureOrderCodes } });
     }
+    await Coupon.deleteMany({ code: /^FESTIVE/ });
     await mongoose.disconnect();
   });
 
@@ -900,5 +902,45 @@ describe('TrueHomes Full-Stack & Cyber-Security Automated Suite', () => {
     assert.ok(Array.isArray(reviews), 'reviews must be an array');
     assert.ok(reviews.length >= 1, 'at least 1 review should exist');
     assert.equal(reviews[0].foodRating, 5);
+  });
+
+  it('21. Dynamic Coupon engine: Admin creates coupon, customer validates and checkout calculates discount', async () => {
+    const couponCode = `FESTIVE${Date.now().toString().slice(-4)}`;
+    
+    // 1. Admin creates a dynamic coupon
+    const createRes = await fetch(`${BASE_URL}/api/admin/coupons`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken}` },
+      body: JSON.stringify({
+        code: couponCode,
+        description: 'Special 40% Festive Discount',
+        discountPercent: 40,
+        maxDiscount: 150,
+        minOrderValue: 200,
+        isFreeDelivery: false
+      })
+    });
+    assert.equal(createRes.status, 201);
+    const couponData = await createRes.json();
+    assert.equal(couponData.code, couponCode);
+
+    // 2. Validate coupon with insufficient order total → 400
+    const failVal = await fetch(`${BASE_URL}/api/coupons/validate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code: couponCode, itemTotal: 150 })
+    });
+    assert.equal(failVal.status, 400);
+
+    // 3. Validate coupon with valid order total → 200
+    const passVal = await fetch(`${BASE_URL}/api/coupons/validate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code: couponCode, itemTotal: 300 })
+    });
+    assert.equal(passVal.status, 200);
+    const valResult = await passVal.json();
+    assert.equal(valResult.valid, true);
+    assert.equal(valResult.discount, 120); // 40% of 300 is 120 (<= 150)
   });
 });

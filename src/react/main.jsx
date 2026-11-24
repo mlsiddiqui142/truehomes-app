@@ -2,6 +2,44 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
 
+// Web Audio synthesizer chime for status updates & notifications
+function playOrderChime() {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const now = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+
+    osc.type = "sine";
+    osc.frequency.setValueAtTime(587.33, now); // D5
+    osc.frequency.setValueAtTime(880, now + 0.12); // A5
+
+    gain.gain.setValueAtTime(0.15, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.35);
+
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+
+    osc.start(now);
+    osc.stop(now + 0.35);
+  } catch (_) {}
+}
+
+function sendWebNotification(title, body) {
+  playOrderChime();
+  if ("Notification" in window) {
+    if (Notification.permission === "granted") {
+      new Notification(title, { body, icon: "/favicon.ico" });
+    } else if (Notification.permission !== "denied") {
+      Notification.requestPermission().then((permission) => {
+        if (permission === "granted") {
+          new Notification(title, { body, icon: "/favicon.ico" });
+        }
+      });
+    }
+  }
+}
+
 function LiveDeliveryMap({ order }) {
   const location = order?.deliveryLocation;
   const latitude = Number(location?.latitude);
@@ -113,6 +151,25 @@ function App() {
   const [viewingRestaurantReviews, setViewingRestaurantReviews] = useState(null);
   const [restaurantReviewsList, setRestaurantReviewsList] = useState([]);
   const [reviewsLoading, setReviewsLoading] = useState(false);
+
+  // New States: Full Categorized Menu View
+  const [activeMenuRestaurant, setActiveMenuRestaurant] = useState(null);
+  const [menuSearch, setMenuSearch] = useState("");
+  const [menuVegOnly, setMenuVegOnly] = useState(false);
+
+  // New States: Promo Coupons
+  const [couponInput, setCouponInput] = useState("");
+  const [appliedCoupon, setAppliedCoupon] = useState(null);
+  const [couponError, setCouponError] = useState("");
+
+  // New States: Standalone Order Tracker by Code
+  const [trackerOpen, setTrackerOpen] = useState(false);
+  const [trackerCodeInput, setTrackerCodeInput] = useState("");
+  const [trackedOrder, setTrackedOrder] = useState(null);
+  const [trackerError, setTrackerError] = useState("");
+  const [trackerConnecting, setTrackerConnecting] = useState(false);
+  const trackerAbortRef = useRef(null);
+
   const locationWatchId = useRef(null);
   const lastLocationSentAt = useRef(0);
 
@@ -334,6 +391,80 @@ function App() {
     [cart]
   );
 
+  const deliveryFee = useMemo(() => {
+    if (appliedCoupon?.isFreeDelivery) return 0;
+    return subtotal >= 299 ? 0 : 35;
+  }, [subtotal, appliedCoupon]);
+
+  const discount = useMemo(() => {
+    if (!appliedCoupon) return 0;
+    return appliedCoupon.discount || 0;
+  }, [appliedCoupon]);
+
+  const finalTotal = useMemo(() => {
+    return Math.max(0, subtotal - discount + deliveryFee);
+  }, [subtotal, discount, deliveryFee]);
+
+  async function applyCoupon() {
+    if (!couponInput.trim()) return;
+    setCouponError("");
+    try {
+      const result = await api("/api/coupons/validate", {
+        method: "POST",
+        body: JSON.stringify({
+          code: couponInput.trim().toUpperCase(),
+          itemTotal: subtotal,
+        }),
+      });
+      setAppliedCoupon(result);
+      setNotice(`Applied coupon ${result.code}: ₹${result.discount} OFF`);
+    } catch (err) {
+      setCouponError(err.message || "Invalid coupon");
+    }
+  }
+
+  function removeCoupon() {
+    setAppliedCoupon(null);
+    setCouponInput("");
+    setCouponError("");
+  }
+
+  async function lookupTrackOrder(e) {
+    if (e) e.preventDefault();
+    const code = trackerCodeInput.trim().toUpperCase();
+    if (!code) return;
+    setTrackerError("");
+    setTrackerConnecting(true);
+
+    if (trackerAbortRef.current) {
+      trackerAbortRef.current.abort();
+    }
+    const controller = new AbortController();
+    trackerAbortRef.current = controller;
+
+    try {
+      const order = await api(`/api/orders/${encodeURIComponent(code)}`);
+      setTrackedOrder(order);
+      setTrackerConnecting(false);
+
+      // Connect to SSE live stream for this order
+      followOrder(code, controller.signal, (updated) => {
+        setTrackedOrder(updated);
+        sendWebNotification(
+          `Order ${updated.orderCode} update`,
+          `Status is now: ${updated.status}`
+        );
+      }).catch((err) => {
+        if (!controller.signal.aborted) {
+          setTrackerError(err.message || "Live stream disconnected");
+        }
+      });
+    } catch (err) {
+      setTrackerConnecting(false);
+      setTrackerError(err.message || "Order not found. Please log in if this is your order.");
+    }
+  }
+
   function addItem(restaurant, dish) {
     setCart((current) => {
       const existing = current.find((item) => item._id === dish._id);
@@ -418,6 +549,7 @@ function App() {
         body: JSON.stringify({
           restaurantId,
           items: cart.map((item) => ({ menuItemId: item._id, qty: item.qty })),
+          couponCode: appliedCoupon?.code || undefined,
           paymentMethod: "COD",
           customerName: user?.name || "React Demo Customer",
           customerPhone: "9876543210",
@@ -425,6 +557,7 @@ function App() {
         }),
       });
       setCart([]);
+      setAppliedCoupon(null);
       setCartOpen(false);
       setNotice(`Order ${order.orderCode} placed`);
     } catch (error) {
@@ -617,6 +750,9 @@ function App() {
           placeholder="Search biryani, thali, pizza..."
         />
         <div className="actions">
+          <button type="button" onClick={() => setTrackerOpen(true)}>
+            Track Order
+          </button>
           <button onClick={() => user ? setAccountOpen((open) => !open) : setAuthOpen(true)}>
             {user?.name || "Sign in"}
           </button>
@@ -684,6 +820,19 @@ function App() {
                   </button>
                 </div>
                 <p>{restaurant.cuisines?.join(" • ")}</p>
+                <div style={{ marginTop: 4, marginBottom: 8 }}>
+                  <button
+                    type="button"
+                    style={{ background: 'none', border: 'none', color: '#ea580c', fontSize: 12, fontWeight: 700, cursor: 'pointer', padding: 0 }}
+                    onClick={() => {
+                      setActiveMenuRestaurant(restaurant);
+                      setMenuSearch("");
+                      setMenuVegOnly(false);
+                    }}
+                  >
+                    View Full Menu ({restaurant.menu?.length || 0} items) →
+                  </button>
+                </div>
                 <div className="menu">
                   {restaurant.menu?.slice(0, 3).map((dish) => (
                     <button
@@ -712,7 +861,41 @@ function App() {
               <b>₹{item.price * item.qty}</b>
             </div>
           ))}
-          <div className="total"><span>Total</span><b>₹{subtotal}</b></div>
+
+          {/* Promo code input & applied pill */}
+          {appliedCoupon ? (
+            <div className="applied-coupon-pill">
+              <span>🎟️ <b>{appliedCoupon.code}</b> applied ({appliedCoupon.description})</span>
+              <button type="button" onClick={removeCoupon}>×</button>
+            </div>
+          ) : (
+            <div className="coupon-input-box">
+              <input
+                type="text"
+                placeholder="PROMO CODE (e.g. TRUE50)"
+                value={couponInput}
+                onChange={(e) => setCouponInput(e.target.value)}
+              />
+              <button type="button" onClick={applyCoupon}>Apply</button>
+            </div>
+          )}
+          {couponError && <p className="admin-stream-error" style={{ margin: "4px 0" }}>{couponError}</p>}
+
+          <div className="cart-summary" style={{ fontSize: 13, borderTop: "1px solid #e2e8f0", paddingTop: 8, marginTop: 8 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", margin: "4px 0" }}>
+              <span>Item Total</span><span>₹{subtotal}</span>
+            </div>
+            {discount > 0 && (
+              <div style={{ display: "flex", justifyContent: "space-between", margin: "4px 0", color: "#059669", fontWeight: 700 }}>
+                <span>Discount</span><span>-₹{discount}</span>
+              </div>
+            )}
+            <div style={{ display: "flex", justifyContent: "space-between", margin: "4px 0" }}>
+              <span>Delivery Fee</span><span>{deliveryFee === 0 ? "FREE" : `₹${deliveryFee}`}</span>
+            </div>
+          </div>
+
+          <div className="total"><span>To Pay</span><b>₹{finalTotal}</b></div>
           <button className="checkout" onClick={checkout}>Place COD order</button>
         </aside>
       )}
@@ -966,7 +1149,168 @@ function App() {
         </div>
       )}
 
-      {/* Review Submission Modal */}
+      {/* Standalone Order Tracker Modal by Code */}
+      {trackerOpen && (
+        <div className="modal-backdrop" onMouseDown={() => setTrackerOpen(false)}>
+          <section className="modal" style={{ maxWidth: 500 }} onMouseDown={(e) => e.stopPropagation()}>
+            <button type="button" className="close" onClick={() => setTrackerOpen(false)}>×</button>
+            <h2>Live Order Tracker</h2>
+            <p className="muted">Track live preparation, rider assignment, and GPS progress</p>
+
+            <form onSubmit={lookupTrackOrder} style={{ display: "flex", gap: 8, margin: "14px 0" }}>
+              <input
+                type="text"
+                placeholder="Enter order code (e.g. TH-ABC123)"
+                value={trackerCodeInput}
+                onChange={(e) => setTrackerCodeInput(e.target.value)}
+                style={{ flex: 1, textTransform: "uppercase", padding: "8px 12px", border: "1px solid #cbd5e1", borderRadius: 10, fontSize: 13 }}
+                required
+              />
+              <button type="submit" className="partner-action" disabled={trackerConnecting}>
+                {trackerConnecting ? "Tracking…" : "Track"}
+              </button>
+            </form>
+
+            {trackerError && <p className="admin-stream-error">{trackerError}</p>}
+
+            {trackedOrder && (
+              <div style={{ marginTop: 16 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <strong>{trackedOrder.orderCode}</strong>
+                  <span className={`order-status ${String(trackedOrder.status).toLowerCase()}`}>
+                    {trackedOrder.status}
+                  </span>
+                </div>
+
+                {/* Progress Stepper */}
+                <div className="stepper-container">
+                  {["CONFIRMED", "PREPARING", "OUT_FOR_DELIVERY", "DELIVERED"].map((st, idx) => {
+                    const statuses = ["CONFIRMED", "PREPARING", "OUT_FOR_DELIVERY", "DELIVERED"];
+                    const currentIdx = statuses.indexOf(trackedOrder.status);
+                    const isCompleted = currentIdx >= idx;
+                    const isActive = currentIdx === idx;
+                    return (
+                      <div key={st} className={`step-node ${isCompleted ? "completed" : ""} ${isActive ? "active" : ""}`}>
+                        <div className="step-circle">{idx + 1}</div>
+                        <span>{st.replace(/_/g, " ")}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                <div style={{ background: "#f8fafc", padding: 12, borderRadius: 12, fontSize: 13, border: "1px solid #f1f5f9" }}>
+                  <p style={{ margin: "4px 0" }}><b>Kitchen:</b> {trackedOrder.restaurantName}</p>
+                  <p style={{ margin: "4px 0" }}><b>Rider:</b> {trackedOrder.assignedPartnerName || "Assigning rider…"}</p>
+                  <p style={{ margin: "4px 0" }}><b>Items:</b> {(trackedOrder.items || []).map((i) => `${i.name} ×${i.qty}`).join(", ")}</p>
+                  <p style={{ margin: "4px 0" }}><b>Amount:</b> ₹{trackedOrder.grandTotal} ({trackedOrder.paymentStatus})</p>
+                </div>
+
+                {trackedOrder.deliveryLocation && (
+                  <div style={{ marginTop: 12 }}>
+                    <p style={{ fontSize: 12, fontWeight: 700, margin: "6px 0", color: "#ea580c" }}>
+                      🛵 Rider is on the way (Live GPS)
+                    </p>
+                    <LiveDeliveryMap order={trackedOrder} />
+                  </div>
+                )}
+              </div>
+            )}
+          </section>
+        </div>
+      )}
+
+      {/* Full Categorized Restaurant Menu Modal */}
+      {activeMenuRestaurant && (
+        <div className="modal-backdrop" onMouseDown={() => setActiveMenuRestaurant(null)}>
+          <section
+            className="modal menu-modal-container"
+            onMouseDown={(e) => e.stopPropagation()}
+          >
+            <div className="menu-header-bar">
+              <div>
+                <h2>{activeMenuRestaurant.name}</h2>
+                <p className="muted">
+                  {activeMenuRestaurant.cuisines?.join(" • ")} · {activeMenuRestaurant.deliveryTime} mins · ₹{activeMenuRestaurant.costForTwo} for two
+                </p>
+              </div>
+              <button type="button" className="close" onClick={() => setActiveMenuRestaurant(null)}>×</button>
+            </div>
+
+            <div className="menu-controls-row">
+              <input
+                className="menu-search-input"
+                placeholder="Search dish in menu…"
+                value={menuSearch}
+                onChange={(e) => setMenuSearch(e.target.value)}
+              />
+              <button
+                type="button"
+                className={`veg-filter-pill ${menuVegOnly ? "active" : ""}`}
+                onClick={() => setMenuVegOnly((v) => !v)}
+              >
+                🌱 Veg Only
+              </button>
+            </div>
+
+            <div className="menu-categories-scroll">
+              {(() => {
+                const filteredDishes = (activeMenuRestaurant.menu || []).filter((d) => {
+                  if (menuVegOnly && !d.isVeg) return false;
+                  if (menuSearch && !d.name.toLowerCase().includes(menuSearch.toLowerCase())) return false;
+                  return true;
+                });
+
+                if (filteredDishes.length === 0) {
+                  return <p className="muted" style={{ padding: "30px 0", textAlign: "center" }}>No items match your filter.</p>;
+                }
+
+                // Group by category
+                const groups = {};
+                for (const dish of filteredDishes) {
+                  const cat = dish.category || "Main Menu";
+                  if (!groups[cat]) groups[cat] = [];
+                  groups[cat].push(dish);
+                }
+
+                return Object.entries(groups).map(([cat, dishes]) => (
+                  <div className="menu-category-section" key={cat}>
+                    <h3 className="menu-category-title">{cat} ({dishes.length})</h3>
+                    <div className="menu-items-list">
+                      {dishes.map((dish) => (
+                        <div className="menu-full-item" key={dish._id}>
+                          <div className="menu-full-item-info">
+                            <div className="menu-full-item-name">
+                              <span className={dish.isVeg ? "badge-veg" : "badge-nonveg"}>
+                                {dish.isVeg ? "🟢" : "🔴"}
+                              </span>
+                              <span>{dish.name}</span>
+                              {dish.isBestseller && <span className="badge-bestseller">★ BESTSELLER</span>}
+                            </div>
+                            <div className="menu-full-item-price">₹{dish.price}</div>
+                            {dish.description && <p className="menu-full-item-desc">{dish.description}</p>}
+                          </div>
+                          <button
+                            type="button"
+                            className="partner-action"
+                            style={{ padding: "6px 14px", fontSize: 13, alignSelf: "center" }}
+                            onClick={() => {
+                              addItem(activeMenuRestaurant, dish);
+                              setNotice(`Added ${dish.name} to cart`);
+                              playOrderChime();
+                            }}
+                          >
+                            + ADD
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ));
+              })()}
+            </div>
+          </section>
+        </div>
+      )}
       {reviewModalOrder && (
         <div className="modal-backdrop" onMouseDown={() => setReviewModalOrder(null)}>
           <form

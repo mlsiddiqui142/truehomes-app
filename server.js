@@ -61,6 +61,7 @@ const Order = require('./models/Order');
 const User = require('./models/User');
 const Review = require('./models/Review');
 const RefreshSession = require('./models/RefreshSession');
+const Coupon = require('./models/Coupon');
 
 if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32) {
   log('fatal', 'JWT_SECRET must be set and be at least 32 characters long');
@@ -685,10 +686,30 @@ app.post('/api/orders', orderLimiter, optionalAuth, async (req, res) => {
     let discount = 0;
     let deliveryFee = itemTotal >= 299 ? 0 : 35;
 
-    if (couponCode === 'TRUE50' && itemTotal >= 199) {
-      discount = Math.min(Math.round(itemTotal * 0.5), 100);
-    } else if (couponCode === 'FREEDEL') {
-      deliveryFee = 0;
+    // Check dynamic coupons from DB or fallback to legacy presets
+    const cleanCoupon = typeof couponCode === 'string' ? couponCode.trim().toUpperCase() : '';
+    if (cleanCoupon) {
+      const dbCoupon = await Coupon.findOne({
+        code: cleanCoupon,
+        isActive: true,
+        $or: [{ expiresAt: null }, { expiresAt: { $gt: new Date() } }]
+      });
+
+      if (dbCoupon) {
+        if (itemTotal >= dbCoupon.minOrderValue) {
+          if (dbCoupon.isFreeDelivery) {
+            deliveryFee = 0;
+          }
+          if (dbCoupon.discountPercent > 0) {
+            const calculated = Math.round((itemTotal * dbCoupon.discountPercent) / 100);
+            discount = Math.min(calculated, dbCoupon.maxDiscount);
+          }
+        }
+      } else if (cleanCoupon === 'TRUE50' && itemTotal >= 199) {
+        discount = Math.min(Math.round(itemTotal * 0.5), 100);
+      } else if (cleanCoupon === 'FREEDEL') {
+        deliveryFee = 0;
+      }
     }
 
     const safeTip = Math.min(Math.max(Number(tip) || 0, 0), 500);
@@ -1380,6 +1401,121 @@ app.post('/api/orders/:orderCode/review', requireAuth, async (req, res) => {
   } catch (err) {
     if (err.code === 11000) return res.status(409).json({ error: 'You have already reviewed this order' });
     return res.status(500).json({ error: err.message || 'Failed to submit review' });
+  }
+});
+
+// ─── Coupon Routes ────────────────────────────────────────────────────────────
+
+// POST /api/coupons/validate — Validate a coupon against an itemTotal
+app.post('/api/coupons/validate', optionalAuth, async (req, res) => {
+  try {
+    const code = String(req.body.code || '').trim().toUpperCase();
+    const itemTotal = Number(req.body.itemTotal) || 0;
+
+    if (!code) return res.status(400).json({ error: 'Coupon code is required' });
+
+    // 1. Check DB coupons
+    const dbCoupon = await Coupon.findOne({
+      code,
+      isActive: true,
+      $or: [{ expiresAt: null }, { expiresAt: { $gt: new Date() } }]
+    });
+
+    if (dbCoupon) {
+      if (itemTotal < dbCoupon.minOrderValue) {
+        return res.status(400).json({
+          error: `Minimum order value of ₹${dbCoupon.minOrderValue} required for ${code}`
+        });
+      }
+      let discount = 0;
+      if (dbCoupon.discountPercent > 0) {
+        discount = Math.min(Math.round((itemTotal * dbCoupon.discountPercent) / 100), dbCoupon.maxDiscount);
+      }
+      return res.json({
+        valid: true,
+        code: dbCoupon.code,
+        discount,
+        isFreeDelivery: dbCoupon.isFreeDelivery,
+        description: dbCoupon.description || `${dbCoupon.discountPercent}% OFF up to ₹${dbCoupon.maxDiscount}`
+      });
+    }
+
+    // 2. Fallback presets
+    if (code === 'TRUE50') {
+      if (itemTotal < 199) return res.status(400).json({ error: 'Minimum order ₹199 required for TRUE50' });
+      return res.json({
+        valid: true,
+        code: 'TRUE50',
+        discount: Math.min(Math.round(itemTotal * 0.5), 100),
+        isFreeDelivery: false,
+        description: '50% OFF up to ₹100'
+      });
+    }
+
+    if (code === 'FREEDEL') {
+      return res.json({
+        valid: true,
+        code: 'FREEDEL',
+        discount: 0,
+        isFreeDelivery: true,
+        description: 'Free Delivery'
+      });
+    }
+
+    return res.status(404).json({ error: 'Invalid or expired coupon code' });
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to validate coupon' });
+  }
+});
+
+// GET /api/coupons/active — Public list of active promotions
+app.get('/api/coupons/active', async (req, res) => {
+  try {
+    const coupons = await Coupon.find({
+      isActive: true,
+      $or: [{ expiresAt: null }, { expiresAt: { $gt: new Date() } }]
+    }).select('code description discountPercent maxDiscount minOrderValue isFreeDelivery');
+
+    const defaultPromos = [
+      { code: 'TRUE50', description: '50% OFF up to ₹100 on orders above ₹199', minOrderValue: 199, discountPercent: 50 },
+      { code: 'FREEDEL', description: 'Free delivery on all homestyle orders', minOrderValue: 0, isFreeDelivery: true }
+    ];
+
+    return res.json([...defaultPromos, ...coupons]);
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to fetch active coupons' });
+  }
+});
+
+// POST /api/admin/coupons — Admin creates a dynamic coupon
+app.post('/api/admin/coupons', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const code = String(req.body.code || '').trim().toUpperCase();
+    const discountPercent = Number(req.body.discountPercent);
+    const maxDiscount = Number(req.body.maxDiscount);
+    const minOrderValue = Number(req.body.minOrderValue) || 0;
+    const isFreeDelivery = Boolean(req.body.isFreeDelivery);
+    const description = typeof req.body.description === 'string' ? req.body.description.trim() : '';
+
+    if (!code || code.length < 3) return res.status(400).json({ error: 'Valid code (3+ chars) required' });
+    if (!isFreeDelivery && (!Number.isFinite(discountPercent) || discountPercent < 1 || discountPercent > 100)) {
+      return res.status(400).json({ error: 'discountPercent must be 1-100' });
+    }
+
+    const coupon = await Coupon.create({
+      code,
+      description,
+      discountPercent: discountPercent || 0,
+      maxDiscount: maxDiscount || 500,
+      minOrderValue,
+      isFreeDelivery,
+      isActive: true
+    });
+
+    return res.status(201).json(coupon);
+  } catch (err) {
+    if (err.code === 11000) return res.status(409).json({ error: 'Coupon code already exists' });
+    return res.status(400).json({ error: err.message || 'Failed to create coupon' });
   }
 });
 
