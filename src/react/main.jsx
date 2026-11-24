@@ -40,6 +40,20 @@ function sendWebNotification(title, body) {
   }
 }
 
+function calculateHaversineDistance(lat1, lon1, lat2, lon2) {
+  const R = 6371; // Earth radius in km
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLon = ((lon2 - lon1) * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos((lat1 * Math.PI) / 180) *
+      Math.cos((lat2 * Math.PI) / 180) *
+      Math.sin(dLon / 2) *
+      Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c; // distance in km
+}
+
 function LiveDeliveryMap({ order }) {
   const location = order?.deliveryLocation;
   const latitude = Number(location?.latitude);
@@ -47,6 +61,12 @@ function LiveDeliveryMap({ order }) {
   if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
     return <p className="muted">Delivery partner GPS has not been shared yet.</p>;
   }
+
+  // Base destination coords (Indirapuram, Ghaziabad hub reference: 28.6327° N, 77.3653° E)
+  const destLat = 28.6327;
+  const destLon = 77.3653;
+  const distanceKm = calculateHaversineDistance(latitude, longitude, destLat, destLon);
+  const estMins = Math.max(3, Math.round(distanceKm * 3.5)); // estimated bike transit time
 
   const offset = 0.006;
   const bounds = [
@@ -63,6 +83,10 @@ function LiveDeliveryMap({ order }) {
 
   return (
     <div className="delivery-location">
+      <div className="rider-eta-banner">
+        <span>🛵 Rider is <b>{distanceKm.toFixed(1)} km</b> away</span>
+        <span>Estimated arrival: <b>~{estMins} mins</b></span>
+      </div>
       <iframe title={`Delivery partner location for ${order.orderCode}`} src={mapUrl} loading="lazy" />
       <p>Last GPS update: {updatedAt} · <a href={mapLink} target="_blank" rel="noreferrer">Open map</a></p>
     </div>
@@ -188,7 +212,7 @@ function App() {
   const [selectedCuisineFilter, setSelectedCuisineFilter] = useState("All");
 
   // New States: Admin Dashboard Tabs & Forms
-  const [adminActiveTab, setAdminActiveTab] = useState("orders"); // "orders", "applications", "add-kitchen", "add-dish"
+  const [adminActiveTab, setAdminActiveTab] = useState("orders"); // "orders", "applications", "add-kitchen", "add-dish", "coupons"
   const [newKitchenName, setNewKitchenName] = useState("");
   const [newKitchenCuisines, setNewKitchenCuisines] = useState("");
   const [newKitchenTime, setNewKitchenTime] = useState(30);
@@ -203,6 +227,15 @@ function App() {
   const [newDishIsVeg, setNewDishIsVeg] = useState(true);
   const [newDishIsBestseller, setNewDishIsBestseller] = useState(false);
   const [newDishDesc, setNewDishDesc] = useState("");
+
+  // New States: Admin Coupon Creator
+  const [adminCouponsList, setAdminCouponsList] = useState([]);
+  const [newCouponCode, setNewCouponCode] = useState("");
+  const [newCouponDiscount, setNewCouponDiscount] = useState(30);
+  const [newCouponMaxDisc, setNewCouponMaxDisc] = useState(150);
+  const [newCouponMinOrder, setNewCouponMinOrder] = useState(199);
+  const [newCouponFreeDel, setNewCouponFreeDel] = useState(false);
+  const [newCouponDesc, setNewCouponDesc] = useState("");
 
   const locationWatchId = useRef(null);
   const lastLocationSentAt = useRef(0);
@@ -231,6 +264,9 @@ function App() {
     api("/api/admin/delivery-partners/pending")
       .then(setPartnerApplications)
       .catch((error) => setPartnerApplicationsError(error.message));
+    api("/api/coupons/active")
+      .then(setAdminCouponsList)
+      .catch(() => {});
   }, [adminOpen, user?.role]);
 
   useEffect(() => {
@@ -899,6 +935,32 @@ function App() {
     }
   }
 
+  async function createCoupon(e) {
+    e.preventDefault();
+    if (!newCouponCode.trim()) return;
+    try {
+      const payload = {
+        code: newCouponCode.trim().toUpperCase(),
+        discountPercent: Number(newCouponDiscount) || 0,
+        maxDiscount: Number(newCouponMaxDisc) || 500,
+        minOrderValue: Number(newCouponMinOrder) || 0,
+        isFreeDelivery: Boolean(newCouponFreeDel),
+        description: newCouponDesc.trim() || undefined,
+      };
+      await api("/api/admin/coupons", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+      setNotice(`Coupon ${payload.code} created successfully!`);
+      setNewCouponCode("");
+      setNewCouponDesc("");
+      const updated = await api("/api/coupons/active");
+      setAdminCouponsList(updated);
+    } catch (err) {
+      setNotice(err.message || "Failed to create coupon");
+    }
+  }
+
   async function sendOrderToPartnerQueue(order) {
     try {
       const updated = await api(`/api/admin/orders/${order._id}/status`, {
@@ -1376,6 +1438,16 @@ function App() {
               >
                 + Add Dish to Menu
               </button>
+              <button
+                type="button"
+                className={`admin-nav-tab ${adminActiveTab === "coupons" ? "active" : ""}`}
+                onClick={() => {
+                  setAdminActiveTab("coupons");
+                  api("/api/coupons/active").then(setAdminCouponsList).catch(() => {});
+                }}
+              >
+                Manage Coupons
+              </button>
             </div>
 
             {adminStreamError && (
@@ -1522,6 +1594,110 @@ function App() {
                   Add Dish to Menu
                 </button>
               </form>
+            )}
+
+            {/* TAB: Manage Coupons */}
+            {adminActiveTab === "coupons" && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+                <form className="admin-form-card" onSubmit={createCoupon}>
+                  <h3 style={{ margin: "0 0 12px", fontSize: 15, fontWeight: 800 }}>Create Promotional Coupon</h3>
+                  <div className="admin-form-grid">
+                    <div>
+                      <label>Coupon Code *</label>
+                      <input
+                        required
+                        placeholder="e.g. FESTIVE40"
+                        value={newCouponCode}
+                        onChange={(e) => setNewCouponCode(e.target.value.toUpperCase())}
+                      />
+                    </div>
+                    <div>
+                      <label>Discount % *</label>
+                      <input
+                        type="number"
+                        min="0"
+                        max="100"
+                        value={newCouponDiscount}
+                        onChange={(e) => setNewCouponDiscount(Number(e.target.value))}
+                        disabled={newCouponFreeDel}
+                      />
+                    </div>
+                    <div>
+                      <label>Max Discount (₹)</label>
+                      <input
+                        type="number"
+                        min="0"
+                        value={newCouponMaxDisc}
+                        onChange={(e) => setNewCouponMaxDisc(Number(e.target.value))}
+                        disabled={newCouponFreeDel}
+                      />
+                    </div>
+                    <div>
+                      <label>Min Order Value (₹)</label>
+                      <input
+                        type="number"
+                        min="0"
+                        value={newCouponMinOrder}
+                        onChange={(e) => setNewCouponMinOrder(Number(e.target.value))}
+                      />
+                    </div>
+                  </div>
+                  <div style={{ display: "flex", gap: 16, alignItems: "center", marginBottom: 12 }}>
+                    <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer", textTransform: "none", fontSize: 13, fontWeight: 600 }}>
+                      <input
+                        type="checkbox"
+                        checked={newCouponFreeDel}
+                        onChange={(e) => setNewCouponFreeDel(e.target.checked)}
+                        style={{ width: "auto" }}
+                      />
+                      Is Free Delivery Coupon
+                    </label>
+                  </div>
+                  <div style={{ marginBottom: 12 }}>
+                    <label>Description / Terms</label>
+                    <input
+                      placeholder="e.g. 40% OFF up to ₹150 on orders above ₹199"
+                      value={newCouponDesc}
+                      onChange={(e) => setNewCouponDesc(e.target.value)}
+                    />
+                  </div>
+                  <button type="submit" className="partner-action" style={{ padding: "8px 20px" }}>
+                    Create Coupon
+                  </button>
+                </form>
+
+                <div className="admin-form-card" style={{ padding: 12 }}>
+                  <h3 style={{ margin: "0 0 12px", fontSize: 14, fontWeight: 800 }}>Active Coupons ({adminCouponsList.length})</h3>
+                  {adminCouponsList.length === 0 ? (
+                    <p className="muted">No active coupons found.</p>
+                  ) : (
+                    <table className="admin-coupon-table">
+                      <thead>
+                        <tr>
+                          <th>Code</th>
+                          <th>Benefit</th>
+                          <th>Min Order</th>
+                          <th>Description</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {adminCouponsList.map((c, idx) => (
+                          <tr key={c.code || idx}>
+                            <td><span className="coupon-badge">{c.code}</span></td>
+                            <td>
+                              {c.isFreeDelivery
+                                ? "Free Delivery"
+                                : `${c.discountPercent}% OFF (max ₹${c.maxDiscount || 500})`}
+                            </td>
+                            <td>₹{c.minOrderValue || 0}</td>
+                            <td className="muted">{c.description || "—"}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+                </div>
+              </div>
             )}
 
             {/* TAB: Rider Applications */}
