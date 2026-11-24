@@ -546,9 +546,37 @@ app.get('/api/auth/me', requireAuth, async (req, res) => {
     const user = await User.findById(req.user.id);
     if (!user) return res.status(404).json({ error: 'User not found' });
 
-    return res.json({ id: user._id, name: user.name, email: user.email, phone: user.phone, role: user.role });
+    return res.json({
+      id: user._id,
+      name: user.name,
+      email: user.email,
+      phone: user.phone,
+      role: user.role,
+      addresses: user.addresses || []
+    });
   } catch (err) {
     return res.status(500).json({ error: 'Failed to load profile' });
+  }
+});
+
+// POST /api/user/addresses — save a new address
+app.post('/api/user/addresses', requireAuth, async (req, res) => {
+  try {
+    const { label = 'Home', address } = req.body;
+    if (!address || typeof address !== 'string' || address.trim().length < 5) {
+      return res.status(400).json({ error: 'Valid delivery address (5+ characters) is required' });
+    }
+
+    const user = await User.findById(req.user.id);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    user.addresses = user.addresses || [];
+    user.addresses.push({ label: String(label).trim().slice(0, 20), address: address.trim().slice(0, 200) });
+    await user.save();
+
+    return res.status(201).json({ addresses: user.addresses });
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to save address' });
   }
 });
 

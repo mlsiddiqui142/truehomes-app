@@ -170,6 +170,19 @@ function App() {
   const [trackerConnecting, setTrackerConnecting] = useState(false);
   const trackerAbortRef = useRef(null);
 
+  // New States: Tip, Address, Payment Method, and Favorites
+  const [riderTip, setRiderTip] = useState(0);
+  const [selectedAddress, setSelectedAddress] = useState("Indirapuram, Ghaziabad");
+  const [newAddressInput, setNewAddressInput] = useState("");
+  const [paymentMethod, setPaymentMethod] = useState("COD");
+  const [favorites, setFavorites] = useState(() => {
+    try {
+      return new Set(JSON.parse(localStorage.getItem("truehomes_favs") || "[]"));
+    } catch (_) {
+      return new Set();
+    }
+  });
+
   const locationWatchId = useRef(null);
   const lastLocationSentAt = useRef(0);
 
@@ -402,8 +415,51 @@ function App() {
   }, [appliedCoupon]);
 
   const finalTotal = useMemo(() => {
-    return Math.max(0, subtotal - discount + deliveryFee);
-  }, [subtotal, discount, deliveryFee]);
+    return Math.max(0, subtotal - discount + deliveryFee + riderTip);
+  }, [subtotal, discount, deliveryFee, riderTip]);
+
+  function toggleFavorite(id) {
+    setFavorites((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      localStorage.setItem("truehomes_favs", JSON.stringify([...next]));
+      return next;
+    });
+  }
+
+  function reorderItems(order) {
+    if (!order?.items || !order.restaurantId) return;
+    const itemsToAdd = order.items.map((it) => ({
+      _id: it.menuItemId,
+      name: it.name,
+      price: it.unitPrice || 150,
+      qty: it.qty || 1,
+      restaurantId: order.restaurantId,
+      restaurantName: order.restaurantName
+    }));
+    setCart(itemsToAdd);
+    setCustomerOrdersOpen(false);
+    setCartOpen(true);
+    setNotice(`Added items from order ${order.orderCode} to cart`);
+    playOrderChime();
+  }
+
+  async function saveNewAddress() {
+    if (!newAddressInput.trim()) return;
+    try {
+      const res = await api("/api/user/addresses", {
+        method: "POST",
+        body: JSON.stringify({ label: "Custom", address: newAddressInput.trim() })
+      });
+      setUser((u) => u ? { ...u, addresses: res.addresses } : u);
+      setSelectedAddress(newAddressInput.trim());
+      setNewAddressInput("");
+      setNotice("Address saved successfully");
+    } catch (err) {
+      setNotice(err.message || "Failed to save address");
+    }
+  }
 
   async function applyCoupon() {
     if (!couponInput.trim()) return;
@@ -550,16 +606,75 @@ function App() {
           restaurantId,
           items: cart.map((item) => ({ menuItemId: item._id, qty: item.qty })),
           couponCode: appliedCoupon?.code || undefined,
-          paymentMethod: "COD",
-          customerName: user?.name || "React Demo Customer",
-          customerPhone: "9876543210",
-          deliveryAddress: "Indirapuram, Ghaziabad",
+          tip: riderTip,
+          paymentMethod,
+          customerName: user?.name || "React Customer",
+          customerPhone: user?.phone || "9876543210",
+          deliveryAddress: selectedAddress,
         }),
       });
+
+      if (paymentMethod === "RAZORPAY") {
+        // Initiate Razorpay flow
+        const initData = await api("/api/payments/razorpay/order", {
+          method: "POST",
+          body: JSON.stringify({ orderId: order._id, orderCode: order.orderCode })
+        });
+
+        if (initData.mode === "simulator") {
+          // Simulator auto-verify
+          await api("/api/payments/razorpay/verify", {
+            method: "POST",
+            body: JSON.stringify({
+              orderId: order._id,
+              orderCode: order.orderCode,
+              simulated: true
+            })
+          });
+          setNotice(`Payment simulated & Order ${order.orderCode} confirmed!`);
+        } else if (window.Razorpay && initData.razorpayOrderId) {
+          const options = {
+            key: initData.keyId,
+            amount: initData.amount,
+            currency: initData.currency,
+            name: "TrueHomes Delivery",
+            description: `Order ${order.orderCode}`,
+            order_id: initData.razorpayOrderId,
+            handler: async function (response) {
+              try {
+                await api("/api/payments/razorpay/verify", {
+                  method: "POST",
+                  body: JSON.stringify({
+                    orderId: order._id,
+                    razorpay_order_id: response.razorpay_order_id,
+                    razorpay_payment_id: response.razorpay_payment_id,
+                    razorpay_signature: response.razorpay_signature
+                  })
+                });
+                setNotice(`Payment verified! Order ${order.orderCode} placed.`);
+              } catch (_) {
+                setNotice("Payment verification failed");
+              }
+            },
+            prefill: {
+              name: user?.name || "TrueHomes Customer",
+              email: user?.email || "",
+              contact: user?.phone || ""
+            },
+            theme: { color: "#ea580c" }
+          };
+          const rzp = new window.Razorpay(options);
+          rzp.open();
+        }
+      } else {
+        setNotice(`Order ${order.orderCode} placed successfully (COD)`);
+      }
+
       setCart([]);
       setAppliedCoupon(null);
+      setRiderTip(0);
       setCartOpen(false);
-      setNotice(`Order ${order.orderCode} placed`);
+      playOrderChime();
     } catch (error) {
       setNotice(error.message);
     }
@@ -808,7 +923,20 @@ function App() {
               )}
               <div className="card-body">
                 <div className="card-title">
-                  <h2>{restaurant.name}</h2>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <button
+                      type="button"
+                      className={`fav-btn ${favorites.has(restaurant._id) ? "active" : ""}`}
+                      title={favorites.has(restaurant._id) ? "Favorited" : "Add to favorites"}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        toggleFavorite(restaurant._id);
+                      }}
+                    >
+                      ♥
+                    </button>
+                    <h2>{restaurant.name}</h2>
+                  </div>
                   <button
                     type="button"
                     className="rating-badge"
@@ -881,6 +1009,75 @@ function App() {
           )}
           {couponError && <p className="admin-stream-error" style={{ margin: "4px 0" }}>{couponError}</p>}
 
+          {/* Delivery Address Selector */}
+          <div className="cart-section-title">Delivery Address</div>
+          <div className="address-selector-box">
+            <select
+              className="address-select-dropdown"
+              value={selectedAddress}
+              onChange={(e) => setSelectedAddress(e.target.value)}
+            >
+              <option value="Indirapuram, Ghaziabad">Indirapuram, Ghaziabad (Default)</option>
+              {(user?.addresses || []).map((addr, idx) => (
+                <option key={idx} value={addr.address}>
+                  {addr.label}: {addr.address}
+                </option>
+              ))}
+            </select>
+            {user && (
+              <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
+                <input
+                  type="text"
+                  placeholder="+ Add new address…"
+                  value={newAddressInput}
+                  onChange={(e) => setNewAddressInput(e.target.value)}
+                  style={{ flex: 1, padding: "4px 8px", fontSize: 11, border: "1px solid #cbd5e1", borderRadius: 8 }}
+                />
+                <button
+                  type="button"
+                  onClick={saveNewAddress}
+                  style={{ background: "#475569", color: "#fff", border: "none", borderRadius: 8, padding: "4px 8px", fontSize: 11, cursor: "pointer" }}
+                >
+                  Save
+                </button>
+              </div>
+            )}
+          </div>
+
+          {/* Rider Tip Selector */}
+          <div className="cart-section-title">Rider Tip (100% goes to rider)</div>
+          <div className="tip-selector-row">
+            {[0, 20, 30, 50].map((amount) => (
+              <button
+                type="button"
+                key={amount}
+                className={`tip-pill ${riderTip === amount ? "active" : ""}`}
+                onClick={() => setRiderTip(amount)}
+              >
+                {amount === 0 ? "None" : `₹${amount}`}
+              </button>
+            ))}
+          </div>
+
+          {/* Payment Method Selector */}
+          <div className="cart-section-title">Payment Method</div>
+          <div className="payment-selector-row">
+            <button
+              type="button"
+              className={`payment-option-btn ${paymentMethod === "COD" ? "active" : ""}`}
+              onClick={() => setPaymentMethod("COD")}
+            >
+              💵 Cash on Delivery
+            </button>
+            <button
+              type="button"
+              className={`payment-option-btn ${paymentMethod === "RAZORPAY" ? "active" : ""}`}
+              onClick={() => setPaymentMethod("RAZORPAY")}
+            >
+              💳 UPI / Online (Razorpay)
+            </button>
+          </div>
+
           <div className="cart-summary" style={{ fontSize: 13, borderTop: "1px solid #e2e8f0", paddingTop: 8, marginTop: 8 }}>
             <div style={{ display: "flex", justifyContent: "space-between", margin: "4px 0" }}>
               <span>Item Total</span><span>₹{subtotal}</span>
@@ -893,10 +1090,17 @@ function App() {
             <div style={{ display: "flex", justifyContent: "space-between", margin: "4px 0" }}>
               <span>Delivery Fee</span><span>{deliveryFee === 0 ? "FREE" : `₹${deliveryFee}`}</span>
             </div>
+            {riderTip > 0 && (
+              <div style={{ display: "flex", justifyContent: "space-between", margin: "4px 0", color: "#ea580c" }}>
+                <span>Rider Tip</span><span>₹{riderTip}</span>
+              </div>
+            )}
           </div>
 
           <div className="total"><span>To Pay</span><b>₹{finalTotal}</b></div>
-          <button className="checkout" onClick={checkout}>Place COD order</button>
+          <button className="checkout" onClick={checkout}>
+            {paymentMethod === "RAZORPAY" ? `Pay ₹${finalTotal} with Razorpay` : `Place COD Order (₹${finalTotal})`}
+          </button>
         </aside>
       )}
 
@@ -1055,21 +1259,29 @@ function App() {
                     <p><b>Restaurant:</b> {order.restaurantName}</p>
                     <p><b>Address:</b> {order.deliveryAddress}</p>
                     <p><b>Delivery partner:</b> {order.assignedPartnerName || "Waiting for a partner"}</p>
-                    {order.status === "DELIVERED" && !reviewedOrders.has(order.orderCode) && (
+                    <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
                       <button
                         type="button"
-                        className="partner-action"
-                        style={{ marginTop: 8 }}
-                        onClick={() => {
-                          setReviewModalOrder(order);
-                          setFoodRating(5);
-                          setDeliveryRating(5);
-                          setReviewComment("");
-                        }}
+                        className="partner-action secondary"
+                        onClick={() => reorderItems(order)}
                       >
-                        Rate & Review Order
+                        ↻ Reorder Items
                       </button>
-                    )}
+                      {order.status === "DELIVERED" && !reviewedOrders.has(order.orderCode) && (
+                        <button
+                          type="button"
+                          className="partner-action"
+                          onClick={() => {
+                            setReviewModalOrder(order);
+                            setFoodRating(5);
+                            setDeliveryRating(5);
+                            setReviewComment("");
+                          }}
+                        >
+                          Rate & Review
+                        </button>
+                      )}
+                    </div>
                     {order.status === "DELIVERED" && reviewedOrders.has(order.orderCode) && (
                       <p className="muted" style={{ marginTop: 4 }}>✓ You reviewed this order</p>
                     )}
