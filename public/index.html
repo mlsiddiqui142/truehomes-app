@@ -3135,15 +3135,25 @@ document.addEventListener('click', (e) => {
 /* TH_CLICK_AUTH_GATE */
 function isTrueHomesSignedIn() {
   try {
-    if (typeof state !== 'undefined' && state && (state.token || state.user)) {
+    if (window.__TH_FORCE_SIGNED_OUT) return false;
+    if (typeof state !== 'undefined' && state && state.token && state.user) {
       return true;
     }
     const savedToken = localStorage.getItem('truehomes_token');
     const savedUser = localStorage.getItem('truehomes_user');
-    return Boolean(savedToken || savedUser);
+    return Boolean(savedToken && savedUser);
   } catch (_) {
     return false;
   }
+}
+
+function lockCloseButtonsOnAuthModal(locked) {
+  const modal = document.getElementById('authModal');
+  if (!modal) return;
+  const closeBtns = modal.querySelectorAll('[onclick*="closeModal"], [data-dismiss], [aria-label*="close" i]');
+  closeBtns.forEach((btn) => {
+    btn.style.display = locked ? 'none' : '';
+  });
 }
 
 function openSignInGateModal(roleHint) {
@@ -3152,8 +3162,13 @@ function openSignInGateModal(roleHint) {
   }
   const modal = document.getElementById('authModal');
   if (modal) {
-    modal.classList.remove('hidden');
-    modal.style.display = '';
+    modal.classList.remove('hidden', 'opacity-0', 'pointer-events-none');
+    modal.style.display = 'flex';
+    modal.style.opacity = '1';
+    modal.style.pointerEvents = 'auto';
+    modal.style.backgroundColor = 'rgba(15, 23, 42, 0.88)';
+    modal.style.backdropFilter = 'blur(8px)';
+    lockCloseButtonsOnAuthModal(!isTrueHomesSignedIn());
     if (typeof mountThreeRoleSignIn === 'function') {
       mountThreeRoleSignIn();
     }
@@ -3163,23 +3178,51 @@ function openSignInGateModal(roleHint) {
   }
 }
 
+function enforceEntryAuthWall() {
+  const signedIn = isTrueHomesSignedIn();
+  lockCloseButtonsOnAuthModal(!signedIn);
+  if (!signedIn) {
+    openSignInGateModal();
+  }
+}
+
+// 1. Open sign-in immediately when visiting the site
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', () => {
+    enforceEntryAuthWall();
+    setTimeout(enforceEntryAuthWall, 150);
+  });
+} else {
+  enforceEntryAuthWall();
+  setTimeout(enforceEntryAuthWall, 150);
+}
+
+// 2. Keep auth wall active if closed or signed out while unauthenticated
+setInterval(() => {
+  if (!isTrueHomesSignedIn()) {
+    const modal = document.getElementById('authModal');
+    if (modal && (modal.classList.contains('hidden') || modal.style.display === 'none')) {
+      openSignInGateModal();
+    }
+  } else {
+    lockCloseButtonsOnAuthModal(false);
+  }
+}, 400);
+
+// 3. Intercept any click outside authModal while signed out
 document.addEventListener('click', (event) => {
   if (isTrueHomesSignedIn()) return;
 
   const target = event.target;
   if (!target || !(target instanceof Element)) return;
 
-  // Allow interacting inside authModal itself (tabs, inputs, login/register/close buttons)
-  const insideAuthModal = target.closest('#authModal');
-  if (insideAuthModal) return;
+  if (target.closest('#authModal')) {
+    const closeAttempt = target.closest('[onclick*="closeModal"], [data-dismiss], [aria-label*="close" i]');
+    if (!closeAttempt) return;
+  }
 
-  // Allow closing other open modals or dismissing toasts/backdrops
-  const dismissControl = target.closest('[onclick*="closeModal"], [data-dismiss], [aria-label*="close" i], [aria-label*="dismiss" i]');
-  if (dismissControl) return;
-
-  // Detect optional role hint from clicked element text/attributes
   const labelText = (target.innerText || target.textContent || '').toLowerCase();
-  let roleHint = 'user';
+  let roleHint = null;
   if (labelText.includes('admin')) roleHint = 'admin';
   else if (labelText.includes('delivery')) roleHint = 'delivery_partner';
 
@@ -3192,66 +3235,13 @@ document.addEventListener('click', (event) => {
   openSignInGateModal(roleHint);
 }, true);
 
-/* TH_CLICK_AUTH_GATE */
-function isTrueHomesSignedIn() {
-  try {
-    if (window.__TH_FORCE_SIGNED_OUT) return false;
-    if (typeof state !== 'undefined' && state && (state.token || state.user)) {
-      return true;
-    }
-    const savedToken = localStorage.getItem('truehomes_token');
-    const savedUser = localStorage.getItem('truehomes_user');
-    return Boolean(savedToken || savedUser);
-  } catch (_) {
-    return false;
+// 4. Block Escape key from dismissing sign-in before authentication
+document.addEventListener('keydown', (event) => {
+  if (!isTrueHomesSignedIn() && event.key === 'Escape') {
+    event.preventDefault();
+    event.stopPropagation();
+    openSignInGateModal();
   }
-}
-
-function openSignInGateModal(roleHint) {
-  if (typeof roleHint === 'string' && typeof setSignInRoleSection === 'function') {
-    setSignInRoleSection(roleHint);
-  }
-  if (typeof openAuthModal === 'function') {
-    openAuthModal(roleHint);
-  }
-  const modal = document.getElementById('authModal');
-  if (modal) {
-    modal.classList.remove('hidden', 'opacity-0', 'pointer-events-none');
-    modal.style.display = 'flex';
-    modal.style.opacity = '1';
-    modal.style.pointerEvents = 'auto';
-    if (typeof mountThreeRoleSignIn === 'function') {
-      mountThreeRoleSignIn();
-    }
-    if (typeof checkExistingAccountForDirectLogin === 'function') {
-      checkExistingAccountForDirectLogin();
-    }
-  }
-}
-
-document.addEventListener('click', (event) => {
-  if (isTrueHomesSignedIn()) return;
-
-  const target = event.target;
-  if (!target || !(target instanceof Element)) return;
-
-  if (target.closest('#authModal')) return;
-
-  const dismissControl = target.closest('[onclick*="closeModal"], [data-dismiss], [aria-label*="close" i], [aria-label*="dismiss" i]');
-  if (dismissControl) return;
-
-  const labelText = (target.innerText || target.textContent || '').toLowerCase();
-  let roleHint = 'user';
-  if (labelText.includes('admin')) roleHint = 'admin';
-  else if (labelText.includes('delivery')) roleHint = 'delivery_partner';
-
-  event.preventDefault();
-  event.stopPropagation();
-  if (typeof event.stopImmediatePropagation === 'function') {
-    event.stopImmediatePropagation();
-  }
-
-  openSignInGateModal(roleHint);
 }, true);
 /* END_TH_CLICK_AUTH_GATE */
 </script>
