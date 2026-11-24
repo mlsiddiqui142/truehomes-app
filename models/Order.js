@@ -31,6 +31,11 @@ const orderSchema = new mongoose.Schema(
     paymentVerifiedAt: { type: Date, default: null },
     assignedPartnerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
     assignedPartnerName: { type: String, default: null },
+    deliveryLocation: {
+      latitude: { type: Number, min: -90, max: 90 },
+      longitude: { type: Number, min: -180, max: 180 },
+      updatedAt: { type: Date }
+    },
     status: {
       type: String,
       enum: ['CONFIRMED', 'PREPARING', 'OUT_FOR_DELIVERY', 'DELIVERED'],

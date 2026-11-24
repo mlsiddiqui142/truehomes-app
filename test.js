@@ -8,6 +8,7 @@ const Restaurant = require('./models/Restaurant');
 const Order = require('./models/Order');
 const User = require('./models/User');
 const Review = require('./models/Review');
+const RefreshSession = require('./models/RefreshSession');
 
 const TEST_PORT = '5055';
 const BASE_URL = `http://127.0.0.1:${TEST_PORT}`;
@@ -15,8 +16,7 @@ const BASE_URL = `http://127.0.0.1:${TEST_PORT}`;
 const runId = Date.now();
 const adminEmail = (process.env.ADMIN_EMAIL || `admin_${runId}@truehomes.test`).trim().toLowerCase();
 const customerEmail = `customer_${runId}@truehomes.test`;
-const partnerEmail = `partner_${runId}@truehomes.test`;
-const partner2Email = `partner2_${runId}@truehomes.test`;
+const partnerEmails = Array.from({ length: 10 }, (_, index) => `partner${index + 1}_${runId}@truehomes.test`);
 const strongPassword = 'TestPassword@2026';
 
 let serverProc;
@@ -24,10 +24,13 @@ let adminToken = '';
 let customerToken = '';
 let partnerToken = '';
 let partner2Token = '';
+const partnerTokens = [];
+const deliveryFixtureOrderCodes = [];
 let createdRestaurantId = '';
 let createdMenuItemId = '';
 let createdOrderId = '';
 let createdOrderCode = '';
+let liveStreamTestOrderCode = '';
 let createdAdminDuringTest = false;
 
 async function waitForServer(retries = 25) {
@@ -61,9 +64,13 @@ describe('TrueHomes Full-Stack & Cyber-Security Automated Suite', () => {
     if (serverProc && !serverProc.killed) {
       serverProc.kill('SIGTERM');
     }
-    await User.deleteMany({ email: { $in: [customerEmail, partnerEmail, partner2Email] } });
-    if (createdAdminDuringTest) {
-      await User.deleteOne({ email: adminEmail });
+    const cleanupEmails = [customerEmail, ...partnerEmails];
+    if (createdAdminDuringTest) cleanupEmails.push(adminEmail);
+    const cleanupUsers = await User.find({ email: { $in: cleanupEmails } }).select('_id').lean();
+    const cleanupUserIds = cleanupUsers.map((user) => user._id);
+    if (cleanupUserIds.length) {
+      await RefreshSession.deleteMany({ userId: { $in: cleanupUserIds } });
+      await User.deleteMany({ _id: { $in: cleanupUserIds } });
     }
     if (createdRestaurantId) {
       await Restaurant.findByIdAndDelete(createdRestaurantId);
@@ -71,6 +78,12 @@ describe('TrueHomes Full-Stack & Cyber-Security Automated Suite', () => {
     if (createdOrderCode) {
       await Review.deleteOne({ orderCode: createdOrderCode });
       await Order.deleteOne({ orderCode: createdOrderCode });
+    }
+    if (liveStreamTestOrderCode) {
+      await Order.deleteOne({ orderCode: liveStreamTestOrderCode });
+    }
+    if (deliveryFixtureOrderCodes.length) {
+      await Order.deleteMany({ orderCode: { $in: deliveryFixtureOrderCodes } });
     }
     await mongoose.disconnect();
   });
@@ -398,39 +411,101 @@ describe('TrueHomes Full-Stack & Cyber-Security Automated Suite', () => {
       body: JSON.stringify({ email: adminEmail, password: '' })
     });
     assert.equal(badAdminDirectRes.status, 401);
+
+    const wrongRoleLogin = await fetch(`${BASE_URL}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: customerEmail, password: strongPassword, role: 'admin' })
+    });
+    assert.equal(wrongRoleLogin.status, 403);
   });
 
   it('14. Delivery partner workflow: blocks customer, permits claim, conflict check, and status update', async () => {
-    const p1Res = await fetch(`${BASE_URL}/api/auth/register`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        name: 'Speedy Rider 1',
-        email: partnerEmail,
-        phone: '+91 9888877771',
-        password: strongPassword,
-        role: 'delivery_partner'
-      })
-    });
-    const p1Data = await p1Res.json();
-    assert.equal(p1Res.status, 201);
-    assert.equal(p1Data.user.role, 'delivery_partner');
-    partnerToken = p1Data.token;
+    const partners = [];
+    for (let index = 0; index < partnerEmails.length; index++) {
+      const email = partnerEmails[index];
+      const partnerRes = await fetch(`${BASE_URL}/api/auth/register`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Forwarded-For': `198.51.100.${index + 1}`
+        },
+        body: JSON.stringify({
+          name: `Speedy Rider ${index + 1}`,
+          email,
+          phone: `+91 98888777${String(index + 10).slice(-2)}`,
+          password: strongPassword,
+          role: 'delivery_partner'
+        })
+      });
+      const partnerData = await partnerRes.json();
+      assert.equal(partnerRes.status, 202);
+      assert.equal(partnerData.pendingApproval, true);
+      assert.equal(partnerData.user.role, 'delivery_partner');
+      assert.equal(partnerData.token, undefined);
+      partners.push(partnerData.user);
 
-    const p2Res = await fetch(`${BASE_URL}/api/auth/register`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        name: 'Speedy Rider 2',
-        email: partner2Email,
-        phone: '+91 9888877772',
-        password: strongPassword,
-        role: 'delivery_partner'
-      })
+      const deniedLogin = await fetch(`${BASE_URL}/api/auth/login`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Forwarded-For': `198.51.100.${index + 1}`
+        },
+        body: JSON.stringify({ email, password: strongPassword, role: 'delivery_partner' })
+      });
+      assert.equal(deniedLogin.status, 403);
+    }
+
+    const jwt = require('jsonwebtoken');
+    const pendingPartnerToken = jwt.sign(
+      { sub: partners[0].id, role: 'delivery_partner' },
+      process.env.JWT_SECRET,
+      { algorithm: 'HS256', expiresIn: '1h' }
+    );
+    const pendingPartnerOrders = await fetch(`${BASE_URL}/api/delivery/orders`, {
+      headers: { Authorization: `Bearer ${pendingPartnerToken}` }
     });
-    const p2Data = await p2Res.json();
-    assert.equal(p2Res.status, 201);
-    partner2Token = p2Data.token;
+    assert.equal(pendingPartnerOrders.status, 403);
+
+    const customerPendingRes = await fetch(`${BASE_URL}/api/admin/delivery-partners/pending`, {
+      headers: { Authorization: `Bearer ${customerToken}` }
+    });
+    assert.equal(customerPendingRes.status, 403);
+    const pendingRes = await fetch(`${BASE_URL}/api/admin/delivery-partners/pending`, {
+      headers: { Authorization: `Bearer ${adminToken}` }
+    });
+    const pending = await pendingRes.json();
+    assert.equal(pendingRes.status, 200);
+    assert.ok(partners.every((partner) => pending.some((item) => item._id === partner.id)));
+
+    for (let index = 0; index < partners.length; index++) {
+      const partner = partners[index];
+      const approveRes = await fetch(`${BASE_URL}/api/admin/delivery-partners/${partner.id}/approve`, {
+        method: 'PATCH',
+        headers: { Authorization: `Bearer ${adminToken}` }
+      });
+      assert.equal(approveRes.status, 200);
+
+      const loginRes = await fetch(`${BASE_URL}/api/auth/login`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Forwarded-For': `198.51.100.${index + 1}`
+        },
+        body: JSON.stringify({
+          email: partnerEmails[index],
+          password: strongPassword,
+          role: 'delivery_partner'
+        })
+      });
+      const loginData = await loginRes.json();
+      assert.equal(loginRes.status, 200);
+      assert.equal(loginData.user.role, 'delivery_partner');
+      assert.ok(loginData.token);
+      partnerTokens.push(loginData.token);
+    }
+    partnerToken = partnerTokens[0];
+    partner2Token = partnerTokens[1];
 
     const custBlock = await fetch(`${BASE_URL}/api/delivery/orders`, {
       headers: { Authorization: `Bearer ${customerToken}` }
@@ -444,6 +519,9 @@ describe('TrueHomes Full-Stack & Cyber-Security Automated Suite', () => {
     assert.equal(fetchRes.status, 200);
     assert.ok(Array.isArray(fetchOrders));
     assert.ok(fetchOrders.some((o) => o._id === createdOrderId));
+    const openOrder = fetchOrders.find((o) => o._id === createdOrderId);
+    assert.equal(openOrder.deliveryAddress, undefined);
+    assert.equal(openOrder.customerPhone, undefined);
 
     const claimRes = await fetch(`${BASE_URL}/api/delivery/orders/${createdOrderId}/claim`, {
       method: 'PATCH',
@@ -459,6 +537,31 @@ describe('TrueHomes Full-Stack & Cyber-Security Automated Suite', () => {
     });
     assert.equal(conflictRes.status, 409);
 
+    const unassignedOrderAccess = await fetch(`${BASE_URL}/api/orders/${createdOrderCode}`, {
+      headers: { Authorization: `Bearer ${partner2Token}` }
+    });
+    assert.equal(unassignedOrderAccess.status, 403);
+
+    const foreignCustomerToken = jwt.sign(
+      { sub: 'unrelated-customer-id', role: 'customer' },
+      process.env.JWT_SECRET,
+      { algorithm: 'HS256', expiresIn: '1h' }
+    );
+    const foreignCustomerAccess = await fetch(`${BASE_URL}/api/orders/${createdOrderCode}`, {
+      headers: { Authorization: `Bearer ${foreignCustomerToken}` }
+    });
+    assert.equal(foreignCustomerAccess.status, 403);
+
+    const prematureLocation = await fetch(`${BASE_URL}/api/delivery/orders/${createdOrderId}/location`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${partnerToken}`
+      },
+      body: JSON.stringify({ latitude: 28.6139, longitude: 77.2094 })
+    });
+    assert.equal(prematureLocation.status, 409);
+
     const outRes = await fetch(`${BASE_URL}/api/delivery/orders/${createdOrderId}/status`, {
       method: 'PATCH',
       headers: {
@@ -471,6 +574,43 @@ describe('TrueHomes Full-Stack & Cyber-Security Automated Suite', () => {
     assert.equal(outRes.status, 200);
     assert.equal(outData.status, 'OUT_FOR_DELIVERY');
 
+    const badLocationRes = await fetch(`${BASE_URL}/api/delivery/orders/${createdOrderId}/location`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${partnerToken}`
+      },
+      body: JSON.stringify({ latitude: 120, longitude: 77.2 })
+    });
+    assert.equal(badLocationRes.status, 400);
+
+    const locationRes = await fetch(`${BASE_URL}/api/delivery/orders/${createdOrderId}/location`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${partnerToken}`
+      },
+      body: JSON.stringify({ latitude: 28.6139, longitude: 77.2094 })
+    });
+    const locationData = await locationRes.json();
+    assert.equal(locationRes.status, 200);
+    assert.equal(locationData.deliveryLocation.latitude, 28.6139);
+
+    const wrongPartnerLocation = await fetch(`${BASE_URL}/api/delivery/orders/${createdOrderId}/location`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${partner2Token}`
+      },
+      body: JSON.stringify({ latitude: 28.6, longitude: 77.2 })
+    });
+    assert.equal(wrongPartnerLocation.status, 403);
+
+    const customerLocation = await fetch(`${BASE_URL}/api/orders/${createdOrderCode}`, {
+      headers: { Authorization: `Bearer ${customerToken}` }
+    });
+    assert.equal((await customerLocation.json()).deliveryLocation.longitude, 77.2094);
+
     const delRes = await fetch(`${BASE_URL}/api/delivery/orders/${createdOrderId}/status`, {
       method: 'PATCH',
       headers: {
@@ -482,9 +622,153 @@ describe('TrueHomes Full-Stack & Cyber-Security Automated Suite', () => {
     const delData = await delRes.json();
     assert.equal(delRes.status, 200);
     assert.equal(delData.status, 'DELIVERED');
+    assert.equal(delData.deliveryLocation, undefined);
+
+    const fixtureOrders = [];
+    for (let index = 0; index < 10; index++) {
+      const orderRes = await fetch(`${BASE_URL}/api/orders`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${customerToken}`,
+          'X-Forwarded-For': `203.0.113.${index + 1}`
+        },
+        body: JSON.stringify({
+          restaurantId: createdRestaurantId,
+          items: [{ menuItemId: createdMenuItemId, qty: 1 }],
+          paymentMethod: 'COD',
+          customerName: 'Test Customer',
+          customerPhone: '+91 9876543210',
+          deliveryAddress: `${100 + index} Simulated Test Street, Noida`
+        })
+      });
+      const order = await orderRes.json();
+      assert.equal(orderRes.status, 201);
+      fixtureOrders.push(order);
+      deliveryFixtureOrderCodes.push(order.orderCode);
+
+      const preparingRes = await fetch(`${BASE_URL}/api/admin/orders/${order._id}/status`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${adminToken}`
+        },
+        body: JSON.stringify({ status: 'PREPARING' })
+      });
+      assert.equal(preparingRes.status, 200);
+    }
+
+    for (let index = 0; index < fixtureOrders.length; index++) {
+      const order = fixtureOrders[index];
+      const auth = { Authorization: `Bearer ${partnerTokens[index]}` };
+      const claim = await fetch(`${BASE_URL}/api/delivery/orders/${order._id}/claim`, {
+        method: 'PATCH',
+        headers: auth
+      });
+      assert.equal(claim.status, 200, `Partner ${index + 1} could not claim order ${order.orderCode}`);
+
+      const out = await fetch(`${BASE_URL}/api/delivery/orders/${order._id}/status`, {
+        method: 'PATCH',
+        headers: { ...auth, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'OUT_FOR_DELIVERY' })
+      });
+      assert.equal(out.status, 200);
+
+      const latitude = 28.6 + index * 0.001;
+      const longitude = 77.2 + index * 0.001;
+      const gps = await fetch(`${BASE_URL}/api/delivery/orders/${order._id}/location`, {
+        method: 'PATCH',
+        headers: { ...auth, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ latitude, longitude })
+      });
+      assert.equal(gps.status, 200);
+      const customerView = await fetch(`${BASE_URL}/api/orders/${order.orderCode}`, {
+        headers: { Authorization: `Bearer ${customerToken}` }
+      });
+      const customerViewData = await customerView.json();
+      assert.equal(customerView.status, 200);
+      assert.equal(customerViewData.deliveryLocation.latitude, latitude);
+
+      const partnerView = await fetch(`${BASE_URL}/api/orders/${order.orderCode}`, { headers: auth });
+      assert.equal(partnerView.status, 200);
+      assert.equal((await partnerView.json()).deliveryLocation.longitude, longitude);
+    }
+
+    const adminOrdersRes = await fetch(`${BASE_URL}/api/admin/orders`, {
+      headers: { Authorization: `Bearer ${adminToken}` }
+    });
+    const adminOrders = await adminOrdersRes.json();
+    assert.equal(adminOrdersRes.status, 200);
+    assert.ok(fixtureOrders.every((order) => adminOrders.some((item) =>
+      item.orderCode === order.orderCode && item.deliveryLocation?.latitude
+    )));
+
+    const liveOrder = fixtureOrders[0];
+    const liveStream = await fetch(`${BASE_URL}/api/orders/${liveOrder.orderCode}/stream`, {
+      headers: { Authorization: `Bearer ${customerToken}` }
+    });
+    assert.equal(liveStream.status, 200);
+    const liveReader = liveStream.body.getReader();
+    const liveDecoder = new TextDecoder();
+    await liveReader.read();
+    const nextLatitude = 28.6999;
+    const liveLocationRes = await fetch(`${BASE_URL}/api/delivery/orders/${liveOrder._id}/location`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${partnerTokens[0]}` },
+      body: JSON.stringify({ latitude: nextLatitude, longitude: 77.2999 })
+    });
+    assert.equal(liveLocationRes.status, 200);
+    const liveLocationEvent = liveDecoder.decode((await liveReader.read()).value);
+    assert.ok(liveLocationEvent.includes(String(nextLatitude)));
+
+    const wrongPartnerStop = await fetch(`${BASE_URL}/api/delivery/orders/${liveOrder._id}/location`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${partnerTokens[1]}` }
+    });
+    assert.equal(wrongPartnerStop.status, 403);
+    const stopSharing = await fetch(`${BASE_URL}/api/delivery/orders/${liveOrder._id}/location`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${partnerTokens[0]}` }
+    });
+    assert.equal(stopSharing.status, 200);
+    assert.equal((await stopSharing.json()).deliveryLocation, undefined);
+    const customerAfterStop = await fetch(`${BASE_URL}/api/orders/${liveOrder.orderCode}`, {
+      headers: { Authorization: `Bearer ${customerToken}` }
+    });
+    assert.equal((await customerAfterStop.json()).deliveryLocation, undefined);
+    await liveReader.cancel();
+
+    for (let index = 0; index < fixtureOrders.length; index++) {
+      const delivered = await fetch(`${BASE_URL}/api/delivery/orders/${fixtureOrders[index]._id}/status`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${partnerTokens[index]}`
+        },
+        body: JSON.stringify({ status: 'DELIVERED' })
+      });
+      assert.equal(delivered.status, 200);
+      assert.equal((await delivered.json()).deliveryLocation, undefined);
+    }
   });
 
   it('15. Streams real-time order status updates over Server-Sent Events (SSE)', async () => {
+    const deniedAdminStream = await fetch(`${BASE_URL}/api/admin/orders/stream`, {
+      headers: { Authorization: `Bearer ${customerToken}` }
+    });
+    assert.equal(deniedAdminStream.status, 403);
+
+    const adminStream = await fetch(`${BASE_URL}/api/admin/orders/stream`, {
+      headers: { Authorization: `Bearer ${adminToken}` }
+    });
+    assert.equal(adminStream.status, 200);
+    assert.ok(adminStream.headers.get('content-type')?.includes('text/event-stream'));
+    const adminReader = adminStream.body.getReader();
+    const adminDecoder = new TextDecoder();
+    const adminSnapshot = adminDecoder.decode((await adminReader.read()).value);
+    assert.ok(adminSnapshot.includes('"type":"snapshot"'));
+    assert.ok(adminSnapshot.includes(createdOrderCode));
+
     const sseRes = await fetch(`${BASE_URL}/api/orders/${createdOrderCode}/stream`, {
       headers: { Authorization: `Bearer ${customerToken}` }
     });
@@ -500,8 +784,31 @@ describe('TrueHomes Full-Stack & Cyber-Security Automated Suite', () => {
     assert.ok(firstText.includes('data:'));
     assert.ok(firstText.includes(createdOrderCode));
 
-    // 2. Trigger status broadcast
-    await fetch(`${BASE_URL}/api/admin/orders/${createdOrderId}/status`, {
+    // New orders from any customer appear in the admin feed immediately.
+    const newOrderRes = await fetch(`${BASE_URL}/api/orders`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${customerToken}`
+      },
+      body: JSON.stringify({
+        restaurantId: createdRestaurantId,
+        items: [{ menuItemId: createdMenuItemId, qty: 1 }],
+        paymentMethod: 'COD',
+        customerName: 'Live Stream Customer',
+        customerPhone: '9876543210',
+        deliveryAddress: 'Live Stream Test Address'
+      })
+    });
+    const newOrder = await newOrderRes.json();
+    assert.equal(newOrderRes.status, 201);
+    liveStreamTestOrderCode = newOrder.orderCode;
+    const newOrderChunk = adminDecoder.decode((await adminReader.read()).value);
+    assert.ok(newOrderChunk.includes('"type":"order"'));
+    assert.ok(newOrderChunk.includes(liveStreamTestOrderCode));
+
+    // Status changes from admin or delivery updates are broadcast to both streams.
+    const statusRes = await fetch(`${BASE_URL}/api/admin/orders/${createdOrderId}/status`, {
       method: 'PATCH',
       headers: {
         'Content-Type': 'application/json',
@@ -509,13 +816,21 @@ describe('TrueHomes Full-Stack & Cyber-Security Automated Suite', () => {
       },
       body: JSON.stringify({ status: 'DELIVERED' })
     });
+    assert.equal(statusRes.status, 200);
 
-    // 3. Read broadcasted update
+    // Owner's order feed receives the update.
     const secondChunk = await reader.read();
     const secondText = decoder.decode(secondChunk.value);
     assert.ok(secondText.includes('DELIVERED'));
 
+    // Admin feed receives live status updates as well.
+    const adminUpdate = adminDecoder.decode((await adminReader.read()).value);
+    assert.ok(adminUpdate.includes('"type":"order"'));
+    assert.ok(adminUpdate.includes(createdOrderCode));
+    assert.ok(adminUpdate.includes('DELIVERED'));
+
     await reader.cancel();
+    await adminReader.cancel();
   });
 
   it('16. Enforces brute-force rate limit (429) on repeated failed logins', async () => {

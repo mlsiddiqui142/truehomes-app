@@ -198,6 +198,10 @@ async function runInterfaceTests() {
   let createdOrderId = '';
   let createdOrderCode = '';
   const testRun = Date.now();
+  const uiCustomerEmail = `ui_cust_${testRun}@truehomes.test`;
+  const uiRiderEmail = `ui_rider_${testRun}@truehomes.test`;
+  let reviewTestEmail = '';
+  let reviewTestOrderCode = '';
 
   await test('4.1 Customer Interface: Fetch restaurants and verify cuisine data', async () => {
     const res = await fetch(`${BASE_URL}/api/restaurants`);
@@ -215,7 +219,7 @@ async function runInterfaceTests() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         name: 'UI Tester Customer',
-        email: `ui_cust_${testRun}@truehomes.test`,
+        email: uiCustomerEmail,
         phone: '+91 9123456780',
         password: 'UiTestPassword@2026',
         role: 'customer'
@@ -264,16 +268,41 @@ async function runInterfaceTests() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         name: 'Super Rider Express',
-        email: `ui_rider_${testRun}@truehomes.test`,
+        email: uiRiderEmail,
         phone: '+91 9876500000',
         password: 'UiTestPassword@2026',
         role: 'delivery_partner'
       })
     });
     const riderData = await riderRes.json();
-    assert.equal(riderRes.status, 201);
+    assert.equal(riderRes.status, 202);
     assert.equal(riderData.user.role, 'delivery_partner');
-    riderToken = riderData.token;
+    assert.equal(riderData.pendingApproval, true);
+
+    const jwt = require('jsonwebtoken');
+    adminToken = jwt.sign(
+      { sub: 'admin-ui-test', role: 'admin' },
+      process.env.JWT_SECRET,
+      { algorithm: 'HS256', expiresIn: '1h' }
+    );
+    const approvalRes = await fetch(`${BASE_URL}/api/admin/delivery-partners/${riderData.user.id}/approve`, {
+      method: 'PATCH',
+      headers: { Authorization: `Bearer ${adminToken}` }
+    });
+    assert.equal(approvalRes.status, 200);
+
+    const loginRes = await fetch(`${BASE_URL}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        email: uiRiderEmail,
+        password: 'UiTestPassword@2026',
+        role: 'delivery_partner'
+      })
+    });
+    const loginData = await loginRes.json();
+    assert.equal(loginRes.status, 200);
+    riderToken = loginData.token;
 
     // Delivery partner views active deliveries
     const ordersRes = await fetch(`${BASE_URL}/api/delivery/orders`, {
@@ -286,10 +315,6 @@ async function runInterfaceTests() {
 
   await test('4.5 Delivery Partner Interface: Claim order and progress delivery', async () => {
     // Admin or system marks order PREPARING
-    const adminEmail = process.env.ADMIN_EMAIL || `admin_${testRun}@truehomes.test`;
-    const jwt = require('jsonwebtoken');
-    adminToken = jwt.sign({ sub: 'admin-ui-test', role: 'admin' }, process.env.JWT_SECRET, { algorithm: 'HS256', expiresIn: '1h' });
-
     await fetch(`${BASE_URL}/api/admin/orders/${createdOrderId}/status`, {
       method: 'PATCH',
       headers: {
@@ -370,6 +395,7 @@ async function runInterfaceTests() {
     // Register a fresh customer
     const runId = Date.now();
     const email = `uirev_${runId}@truehomes.test`;
+    reviewTestEmail = email;
     const regRes = await fetch(`${BASE_URL}/api/auth/register`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -400,6 +426,7 @@ async function runInterfaceTests() {
     assert.ok(orderData._id, `Order creation failed: ${JSON.stringify(orderData)}`);
     const orderId = orderData._id;
     const orderCode = orderData.orderCode;
+    reviewTestOrderCode = orderCode;
 
     // Verify payment (simulated — this sets status to PAID)
     await fetch(`${BASE_URL}/api/orders/${orderId}/verify-payment`, {
@@ -465,6 +492,28 @@ async function runInterfaceTests() {
   await test('5.5 Restaurant cards show reviewCount badge when reviews exist', async () => {
     // The template should contain the reviewCount conditional expression
     assert.ok(appJs.includes('reviewCount'), 'reviewCount field not referenced in app JS');
+  });
+
+  await test('5.6 Remove temporary UI test accounts, orders, and sessions', async () => {
+    const mongoose = require('mongoose');
+    const User = require('./models/User');
+    const Order = require('./models/Order');
+    const Review = require('./models/Review');
+    const RefreshSession = require('./models/RefreshSession');
+    const emails = [uiCustomerEmail, uiRiderEmail, reviewTestEmail].filter(Boolean);
+    const orderCodes = [createdOrderCode, reviewTestOrderCode].filter(Boolean);
+    await mongoose.connect(process.env.MONGO_URI);
+    const users = await User.find({ email: { $in: emails } }).select('_id').lean();
+    const userIds = users.map((user) => user._id);
+    if (orderCodes.length) {
+      await Review.deleteMany({ orderCode: { $in: orderCodes } });
+      await Order.deleteMany({ orderCode: { $in: orderCodes } });
+    }
+    if (userIds.length) {
+      await RefreshSession.deleteMany({ userId: { $in: userIds } });
+      await User.deleteMany({ _id: { $in: userIds } });
+    }
+    await mongoose.disconnect();
   });
 
   console.log('\n====================================================');

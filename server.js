@@ -22,6 +22,7 @@ function broadcastOrderUpdate(order) {
   if (!order || !order.orderCode) return;
   const value = typeof order.toObject === 'function' ? order.toObject() : { ...order };
   orderEvents.emit(order.orderCode, value);
+  orderEvents.emit('admin-orders', value);
 }
 
 const ORDER_TRANSITIONS = {
@@ -40,6 +41,14 @@ function canAccessOwnedOrder(req, order) {
   if (!order.userId) return true;
   if (!req.user) return false;
   return req.user.role === 'admin' || req.user.id === String(order.userId);
+}
+
+function canTrackOrder(req, order) {
+  if (!req.user) return false;
+  if (req.user.role === 'admin') return true;
+  if (order.userId && req.user.id === String(order.userId)) return true;
+  return req.user.role === 'delivery_partner' &&
+    String(order.assignedPartnerId || '') === req.user.id;
 }
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
@@ -169,7 +178,7 @@ app.use(
         styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com", "https://cdnjs.cloudflare.com"],
         fontSrc: ["'self'", "https://fonts.gstatic.com", "https://cdnjs.cloudflare.com"],
         imgSrc: ["'self'", "data:", "https://images.unsplash.com", "https://plus.unsplash.com", "https://*.razorpay.com"],
-        frameSrc: ["'self'", "https://api.razorpay.com", "https://checkout.razorpay.com"],
+        frameSrc: ["'self'", "https://api.razorpay.com", "https://checkout.razorpay.com", "https://www.openstreetmap.org"],
         connectSrc: ["'self'", "https://api.razorpay.com", "https://lumberjack.razorpay.com"]
       }
     }
@@ -326,7 +335,20 @@ function requireDeliveryPartner(req, res, next) {
   if (!req.user || (req.user.role !== 'delivery_partner' && req.user.role !== 'admin')) {
     return res.status(403).json({ error: 'Delivery partner privileges required' });
   }
-  return next();
+  if (req.user.role === 'admin') return next();
+
+  User.findById(req.user.id).select('isApproved').then((partner) => {
+    if (!partner || !partner.isApproved) {
+      return res.status(403).json({ error: 'Delivery partner account is awaiting admin approval' });
+    }
+    return next();
+  }).catch((err) => {
+    log('error', 'delivery_partner_approval_check_failed', {
+      requestId: req.requestId,
+      error: err.message
+    });
+    return res.status(500).json({ error: 'Could not verify delivery partner access' });
+  });
 }
 
 function escapeRegex(text) {
@@ -422,8 +444,16 @@ app.post('/api/auth/register', authLimiter, async (req, res) => {
       email,
       phone,
       passwordHash,
-      role: assignedRole
+      role: assignedRole,
+      isApproved: assignedRole !== 'delivery_partner'
     });
+    if (assignedRole === 'delivery_partner') {
+      return res.status(202).json({
+        pendingApproval: true,
+        message: 'Delivery partner application submitted. Admin approval is required before sign in.',
+        user: { id: user._id, name: user.name, email: user.email, phone: user.phone, role: user.role }
+      });
+    }
     const token = signUserToken(user);
     await createRefreshSession(res, user);
 
@@ -453,6 +483,14 @@ app.post('/api/auth/login', authLimiter, async (req, res) => {
 
     if (!user || !isMatch) {
       return res.status(401).json({ error: 'Invalid email or password' });
+    }
+    if (user.role === 'delivery_partner' && !user.isApproved) {
+      return res.status(403).json({ error: 'Delivery partner account is awaiting admin approval' });
+    }
+    if (typeof req.body.role === 'string' &&
+        ['customer', 'admin', 'delivery_partner'].includes(req.body.role) &&
+        req.body.role !== user.role) {
+      return res.status(403).json({ error: 'Account does not match the selected login type' });
     }
 
     const token = signUserToken(user);
@@ -486,6 +524,9 @@ app.post('/api/auth/direct-login', authLimiter, async (req, res) => {
     const isMatch = await bcrypt.compare(password, user.passwordHash);
     if (!isMatch) {
       return res.status(401).json({ error: 'Invalid email or password' });
+    }
+    if (user.role === 'delivery_partner' && !user.isApproved) {
+      return res.status(403).json({ error: 'Delivery partner account is awaiting admin approval' });
     }
 
     const token = signUserToken(user);
@@ -676,6 +717,7 @@ app.post('/api/orders', orderLimiter, optionalAuth, async (req, res) => {
       paymentStatus: isCod ? 'COD' : 'PENDING'
     });
 
+    broadcastOrderUpdate(newOrder);
     return res.status(201).json(newOrder);
   } catch (err) {
     return res.status(400).json({ error: err.message || 'Could not place order' });
@@ -841,8 +883,7 @@ app.get('/api/orders/:orderCode', requireAuth, async (req, res) => {
     const code = String(req.params.orderCode).toUpperCase().replace(/[^A-Z0-9-]/g, '');
     const order = await Order.findOne({ orderCode: code }).lean();
     if (!order) return res.status(404).json({ error: 'Order not found' });
-    if (!canAccessOwnedOrder(req, order) &&
-        !(req.user.role === 'delivery_partner' && String(order.assignedPartnerId) === req.user.id)) {
+    if (!canTrackOrder(req, order)) {
       return res.status(403).json({ error: 'You do not have access to this order' });
     }
 
@@ -857,8 +898,7 @@ app.get('/api/orders/:orderCode/stream', requireAuth, async (req, res) => {
     const code = String(req.params.orderCode).toUpperCase().replace(/[^A-Z0-9-]/g, '');
     const order = await Order.findOne({ orderCode: code }).lean();
     if (!order) return res.status(404).json({ error: 'Order not found' });
-    if (!canAccessOwnedOrder(req, order) &&
-        !(req.user.role === 'delivery_partner' && String(order.assignedPartnerId) === req.user.id)) {
+    if (!canTrackOrder(req, order)) {
       return res.status(403).json({ error: 'You do not have access to this order' });
     }
 
@@ -898,6 +938,55 @@ app.get('/api/admin/orders', requireAuth, requireAdmin, async (req, res) => {
   }
 });
 
+app.get('/api/admin/orders/stream', requireAuth, requireAdmin, async (req, res) => {
+  let ready = false;
+  let ping;
+  const pendingUpdates = [];
+  const send = (event) => {
+    if (!res.destroyed) res.write(`data: ${JSON.stringify(event)}\n\n`);
+  };
+  const onUpdate = (order) => {
+    if (ready) send({ type: 'order', order });
+    else pendingUpdates.push(order);
+  };
+  const cleanup = () => {
+    clearInterval(ping);
+    orderEvents.off('admin-orders', onUpdate);
+  };
+
+  orderEvents.on('admin-orders', onUpdate);
+  res.once('close', cleanup);
+
+  try {
+    const orders = await Order.find().sort({ createdAt: -1 }).lean();
+    if (res.destroyed) return cleanup();
+
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache, no-transform',
+      Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no'
+    });
+    send({ type: 'snapshot', orders });
+    ready = true;
+    pendingUpdates.forEach((order) => send({ type: 'order', order }));
+
+    ping = setInterval(() => {
+      if (!res.destroyed) res.write(': ping\n\n');
+    }, 20000);
+  } catch (err) {
+    cleanup();
+    log('error', 'admin_order_stream_failed', {
+      requestId: req.requestId,
+      error: err.message
+    });
+    if (!res.headersSent) {
+      return res.status(500).json({ error: 'Failed to open admin order stream' });
+    }
+    return res.end();
+  }
+});
+
 app.patch('/api/admin/orders/:id/status', requireAuth, requireAdmin, async (req, res) => {
   try {
     if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
@@ -919,9 +1008,11 @@ app.patch('/api/admin/orders/:id/status', requireAuth, requireAdmin, async (req,
       });
     }
 
+    const update = { $set: { status } };
+    if (status === 'DELIVERED') update.$unset = { deliveryLocation: 1 };
     const order = await Order.findOneAndUpdate(
       { _id: req.params.id, status: currentOrder.status },
-      { status },
+      update,
       { new: true }
     );
     if (!order) return res.status(404).json({ error: 'Order not found' });
@@ -933,15 +1024,55 @@ app.patch('/api/admin/orders/:id/status', requireAuth, requireAdmin, async (req,
   }
 });
 
+app.get('/api/admin/delivery-partners/pending', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const partners = await User.find({
+      role: 'delivery_partner',
+      isApproved: { $ne: true }
+    }).select('name email phone createdAt').sort({ createdAt: 1 }).lean();
+    return res.json(partners);
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to load delivery partner applications' });
+  }
+});
+
+app.patch('/api/admin/delivery-partners/:id/approve', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ error: 'Invalid delivery partner ID' });
+    }
+    const partner = await User.findOneAndUpdate(
+      { _id: req.params.id, role: 'delivery_partner' },
+      { isApproved: true },
+      { new: true }
+    ).select('name email phone role isApproved');
+    if (!partner) return res.status(404).json({ error: 'Delivery partner application not found' });
+    return res.json(partner);
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to approve delivery partner' });
+  }
+});
+
 app.get('/api/delivery/orders', requireAuth, requireDeliveryPartner, async (req, res) => {
   try {
     const orders = await Order.find({
       $or: [
-        { status: 'PREPARING' },
+        { status: 'PREPARING', assignedPartnerId: null },
         { assignedPartnerId: req.user.id }
       ]
     }).sort({ createdAt: -1 }).limit(40);
-    return res.json(orders);
+    const visibleOrders = orders.map((order) => {
+      const value = order.toObject();
+      if (req.user.role !== 'admin' &&
+          String(value.assignedPartnerId || '') !== String(req.user.id)) {
+        delete value.customerName;
+        delete value.customerPhone;
+        delete value.deliveryAddress;
+        delete value.userId;
+      }
+      return value;
+    });
+    return res.json(visibleOrders);
   } catch (err) {
     return res.status(500).json({ error: 'Failed to fetch delivery orders' });
   }
@@ -958,18 +1089,22 @@ app.patch('/api/delivery/orders/:id/claim', requireAuth, requireDeliveryPartner,
 
     const currentOrder = await Order.findById(req.params.id);
     if (!currentOrder) return res.status(404).json({ error: 'Order not found' });
+    if (currentOrder.status !== 'PREPARING') {
+      return res.status(409).json({ error: 'Only orders being prepared can be claimed' });
+    }
     if (currentOrder.assignedPartnerId &&
         currentOrder.assignedPartnerId.toString() !== req.user.id) {
       return res.status(409).json({ error: 'Order already claimed by another delivery partner' });
+    }
+    if (String(currentOrder.assignedPartnerId || '') === req.user.id) {
+      return res.json(currentOrder);
     }
 
     const order = await Order.findOneAndUpdate(
       {
         _id: req.params.id,
-        $or: [
-          { assignedPartnerId: null },
-          { assignedPartnerId: req.user.id }
-        ]
+        status: 'PREPARING',
+        assignedPartnerId: null
       },
       {
         assignedPartnerId: req.user.id,
@@ -984,6 +1119,67 @@ app.patch('/api/delivery/orders/:id/claim', requireAuth, requireDeliveryPartner,
     return res.json(order);
   } catch (err) {
     return res.status(400).json({ error: 'Failed to claim delivery order' });
+  }
+});
+
+app.patch('/api/delivery/orders/:id/location', requireAuth, requireDeliveryPartner, async (req, res) => {
+  try {
+    if (req.user.role !== 'delivery_partner') {
+      return res.status(403).json({ error: 'Only assigned delivery partners can share GPS location' });
+    }
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ error: 'Invalid order ID' });
+    }
+    const { latitude, longitude } = req.body;
+    if (typeof latitude !== 'number' || !Number.isFinite(latitude) ||
+        latitude < -90 || latitude > 90 ||
+        typeof longitude !== 'number' || !Number.isFinite(longitude) ||
+        longitude < -180 || longitude > 180) {
+      return res.status(400).json({ error: 'Latitude or longitude is invalid' });
+    }
+
+    const order = await Order.findById(req.params.id);
+    if (!order) return res.status(404).json({ error: 'Order not found' });
+    if (String(order.assignedPartnerId) !== String(req.user.id)) {
+      return res.status(403).json({ error: 'You must claim this order before sharing location' });
+    }
+    if (order.status !== 'OUT_FOR_DELIVERY') {
+      return res.status(409).json({ error: 'GPS sharing is available only during an active delivery' });
+    }
+
+    order.deliveryLocation = { latitude, longitude, updatedAt: new Date() };
+    await order.save();
+    broadcastOrderUpdate(order);
+    return res.json(order);
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to update delivery location' });
+  }
+});
+
+app.delete('/api/delivery/orders/:id/location', requireAuth, requireDeliveryPartner, async (req, res) => {
+  try {
+    if (req.user.role !== 'delivery_partner') {
+      return res.status(403).json({ error: 'Only assigned delivery partners can stop GPS sharing' });
+    }
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ error: 'Invalid order ID' });
+    }
+
+    const order = await Order.findById(req.params.id);
+    if (!order) return res.status(404).json({ error: 'Order not found' });
+    if (String(order.assignedPartnerId) !== String(req.user.id)) {
+      return res.status(403).json({ error: 'You must claim this order before managing location sharing' });
+    }
+    if (order.status !== 'OUT_FOR_DELIVERY') {
+      return res.status(409).json({ error: 'GPS sharing is available only during an active delivery' });
+    }
+
+    order.deliveryLocation = undefined;
+    await order.save();
+    broadcastOrderUpdate(order);
+    return res.json(order);
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to stop delivery location sharing' });
   }
 });
 
@@ -1013,9 +1209,11 @@ app.patch('/api/delivery/orders/:id/status', requireAuth, requireDeliveryPartner
       });
     }
 
+    const update = { $set: { status } };
+    if (status === 'DELIVERED') update.$unset = { deliveryLocation: 1 };
     const updatedOrder = await Order.findOneAndUpdate(
       { _id: req.params.id, status: order.status },
-      { status },
+      update,
       { new: true }
     );
     if (!updatedOrder) {
