@@ -943,4 +943,57 @@ describe('TrueHomes Full-Stack & Cyber-Security Automated Suite', () => {
     assert.equal(valResult.valid, true);
     assert.equal(valResult.discount, 120); // 40% of 300 is 120 (<= 150)
   });
+
+  it('22. Customer Profile & Address Management and Rider Availability Toggle', async () => {
+    // 1. Update customer profile details (name & phone)
+    const profRes = await fetch(`${BASE_URL}/api/user/profile`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${customerToken}`
+      },
+      body: JSON.stringify({ name: 'Rohit Sharma (VIP)', phone: '9988776655' })
+    });
+    assert.equal(profRes.status, 200);
+    const profData = await profRes.json();
+    assert.equal(profData.name, 'Rohit Sharma (VIP)');
+    assert.equal(profData.phone, '9988776655');
+
+    // 2. Save a new delivery address
+    const addRes = await fetch(`${BASE_URL}/api/user/addresses`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${customerToken}`
+      },
+      body: JSON.stringify({ label: 'Office', address: 'Tech Park Tower B, 4th Floor, Sector 62, Noida' })
+    });
+    assert.equal(addRes.status, 201);
+    const addData = await addRes.json();
+    assert.ok(Array.isArray(addData.addresses));
+    const createdAddress = addData.addresses.find((a) => a.label === 'Office');
+    assert.ok(createdAddress);
+
+    // 3. Delete the saved address
+    const delRes = await fetch(`${BASE_URL}/api/user/addresses/${createdAddress._id}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${customerToken}` }
+    });
+    assert.equal(delRes.status, 200);
+    const delData = await delRes.json();
+    assert.ok(!delData.addresses.some((a) => a._id === createdAddress._id));
+
+    // 4. Rider toggles duty availability (offline -> online)
+    const availRes = await fetch(`${BASE_URL}/api/delivery/availability`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${partnerToken}`
+      },
+      body: JSON.stringify({ isAvailable: false })
+    });
+    assert.equal(availRes.status, 200);
+    const availData = await availRes.json();
+    assert.equal(availData.isAvailable, false);
+  });
 });

@@ -986,3 +986,109 @@ main { max-width: 1180px; margin: 0 auto; padding: 24px; }
   font-size: 12px;
   border: 1px solid #fde68a;
 }
+
+/* Global Veg-Only Switcher */
+.veg-mode-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: #f0fdf4;
+  border: 1px solid #bbf7d0;
+  border-radius: 20px;
+  padding: 4px 12px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #166534;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  user-select: none;
+}
+.veg-mode-toggle.active {
+  background: #16a34a;
+  border-color: #15803d;
+  color: #ffffff;
+}
+.veg-mode-toggle .veg-icon {
+  font-size: 14px;
+}
+
+/* Profile & Address Management Modal */
+.profile-modal {
+  max-width: 520px;
+  width: 95%;
+  background: #ffffff;
+  border-radius: 20px;
+  padding: 24px;
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
+}
+.profile-section-card {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  padding: 14px;
+  margin-bottom: 14px;
+}
+.profile-section-card h3 {
+  margin: 0 0 10px;
+  font-size: 13px;
+  font-weight: 800;
+  color: #334155;
+  text-transform: uppercase;
+}
+.address-item-card {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+}
+.address-item-card .addr-label {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 800;
+  background: #e2e8f0;
+  color: #1e293b;
+  padding: 2px 6px;
+  border-radius: 4px;
+  margin-right: 8px;
+}
+.addr-delete-btn {
+  background: #fee2e2;
+  color: #dc2626;
+  border: 1px solid #fca5a5;
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.addr-delete-btn:hover {
+  background: #fecaca;
+}
+
+/* Rider Duty Status Pill */
+.duty-status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  border-radius: 20px;
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  border: 1px solid transparent;
+}
+.duty-status-pill.online {
+  background: #dcfce7;
+  color: #15803d;
+  border-color: #86efac;
+}
+.duty-status-pill.offline {
+  background: #fee2e2;
+  color: #b91c1c;
+  border-color: #fca5a5;
+}

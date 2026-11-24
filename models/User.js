@@ -21,7 +21,8 @@ const userSchema = new mongoose.Schema(
     ],
     passwordHash: { type: String, required: true, select: false },
     role: { type: String, enum: ['customer', 'admin', 'delivery_partner'], default: 'customer' },
-    isApproved: { type: Boolean, default: false }
+    isApproved: { type: Boolean, default: false },
+    isAvailable: { type: Boolean, default: true }
   },
   { timestamps: true }
 );

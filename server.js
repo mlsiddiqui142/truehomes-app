@@ -552,10 +552,40 @@ app.get('/api/auth/me', requireAuth, async (req, res) => {
       email: user.email,
       phone: user.phone,
       role: user.role,
+      isAvailable: user.isAvailable !== false,
       addresses: user.addresses || []
     });
   } catch (err) {
     return res.status(500).json({ error: 'Failed to load profile' });
+  }
+});
+
+// PATCH /api/user/profile — update customer profile details
+app.patch('/api/user/profile', requireAuth, async (req, res) => {
+  try {
+    const { name, phone } = req.body;
+    const user = await User.findById(req.user.id);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    if (typeof name === 'string' && name.trim().length >= 2) {
+      user.name = name.trim().slice(0, 80);
+    }
+    if (typeof phone === 'string' && phone.trim().length >= 10) {
+      user.phone = phone.trim().slice(0, 15);
+    }
+    await user.save();
+
+    return res.json({
+      id: user._id,
+      name: user.name,
+      email: user.email,
+      phone: user.phone,
+      role: user.role,
+      isAvailable: user.isAvailable !== false,
+      addresses: user.addresses || []
+    });
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to update profile' });
   }
 });
 
@@ -577,6 +607,28 @@ app.post('/api/user/addresses', requireAuth, async (req, res) => {
     return res.status(201).json({ addresses: user.addresses });
   } catch (err) {
     return res.status(500).json({ error: 'Failed to save address' });
+  }
+});
+
+// DELETE /api/user/addresses/:addressId — remove a saved address
+app.delete('/api/user/addresses/:addressId', requireAuth, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    const initialLength = (user.addresses || []).length;
+    user.addresses = (user.addresses || []).filter(
+      (a) => String(a._id) !== String(req.params.addressId)
+    );
+
+    if (user.addresses.length === initialLength) {
+      return res.status(404).json({ error: 'Address not found' });
+    }
+
+    await user.save();
+    return res.json({ addresses: user.addresses });
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to remove address' });
   }
 });
 
@@ -1124,6 +1176,26 @@ app.get('/api/delivery/orders', requireAuth, requireDeliveryPartner, async (req,
     return res.json(visibleOrders);
   } catch (err) {
     return res.status(500).json({ error: 'Failed to fetch delivery orders' });
+  }
+});
+
+// PATCH /api/delivery/availability — Rider toggles duty availability (online / offline)
+app.patch('/api/delivery/availability', requireAuth, requireDeliveryPartner, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    user.isAvailable = req.body.isAvailable !== undefined ? Boolean(req.body.isAvailable) : !user.isAvailable;
+    await user.save();
+
+    return res.json({
+      id: user._id,
+      name: user.name,
+      role: user.role,
+      isAvailable: user.isAvailable
+    });
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to update availability' });
   }
 });
 

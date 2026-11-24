@@ -210,6 +210,14 @@ function App() {
 
   // New States: Cuisine & Dietary Filter Pills
   const [selectedCuisineFilter, setSelectedCuisineFilter] = useState("All");
+  const [globalVegOnly, setGlobalVegOnly] = useState(false);
+
+  // New States: Profile & Address Manager Modal
+  const [profileOpen, setProfileOpen] = useState(false);
+  const [profileNameInput, setProfileNameInput] = useState("");
+  const [profilePhoneInput, setProfilePhoneInput] = useState("");
+  const [profileAddrLabel, setProfileAddrLabel] = useState("Home");
+  const [profileAddrText, setProfileAddrText] = useState("");
 
   // New States: Admin Dashboard Tabs & Forms
   const [adminActiveTab, setAdminActiveTab] = useState("orders"); // "orders", "applications", "add-kitchen", "add-dish", "coupons"
@@ -540,6 +548,67 @@ function App() {
     setAppliedCoupon(null);
     setCouponInput("");
     setCouponError("");
+  }
+
+  async function updateProfile(e) {
+    e.preventDefault();
+    try {
+      const updated = await api("/api/user/profile", {
+        method: "PATCH",
+        body: JSON.stringify({
+          name: profileNameInput.trim() || undefined,
+          phone: profilePhoneInput.trim() || undefined
+        })
+      });
+      setUser((prev) => ({ ...prev, ...updated }));
+      setNotice("Profile updated successfully!");
+    } catch (err) {
+      setNotice(err.message || "Failed to update profile");
+    }
+  }
+
+  async function addProfileAddress(e) {
+    e.preventDefault();
+    if (!profileAddrText.trim()) return;
+    try {
+      const res = await api("/api/user/addresses", {
+        method: "POST",
+        body: JSON.stringify({
+          label: profileAddrLabel,
+          address: profileAddrText.trim()
+        })
+      });
+      setUser((prev) => ({ ...prev, addresses: res.addresses }));
+      setProfileAddrText("");
+      setNotice("Address added!");
+    } catch (err) {
+      setNotice(err.message || "Failed to add address");
+    }
+  }
+
+  async function deleteProfileAddress(addressId) {
+    try {
+      const res = await api(`/api/user/addresses/${addressId}`, {
+        method: "DELETE"
+      });
+      setUser((prev) => ({ ...prev, addresses: res.addresses }));
+      setNotice("Address deleted");
+    } catch (err) {
+      setNotice(err.message || "Failed to delete address");
+    }
+  }
+
+  async function toggleRiderAvailability() {
+    try {
+      const res = await api("/api/delivery/availability", {
+        method: "PATCH",
+        body: JSON.stringify({ isAvailable: !user?.isAvailable })
+      });
+      setUser((prev) => ({ ...prev, isAvailable: res.isAvailable }));
+      setNotice(`You are now ${res.isAvailable ? "Online (Receiving orders)" : "Offline (Duty paused)"}`);
+    } catch (err) {
+      setNotice(err.message || "Failed to toggle duty availability");
+    }
   }
 
   async function lookupTrackOrder(e) {
@@ -1024,6 +1093,15 @@ function App() {
           placeholder="Search biryani, thali, pizza..."
         />
         <div className="actions">
+          <button
+            type="button"
+            className={`veg-mode-toggle ${globalVegOnly ? "active" : ""}`}
+            onClick={() => setGlobalVegOnly(!globalVegOnly)}
+            title="Toggle Pure Vegetarian Kitchens & Items"
+          >
+            <span className="veg-icon">🌱</span>
+            <span>{globalVegOnly ? "Veg Only ON" : "Veg Only"}</span>
+          </button>
           <button type="button" onClick={() => setTrackerOpen(true)}>
             Track Order
           </button>
@@ -1039,6 +1117,17 @@ function App() {
             <strong>{user.name}</strong>
             <span>{user.email}</span>
             <small>{String(user.role).replace("_", " ").toUpperCase()}</small>
+            <button
+              type="button"
+              onClick={() => {
+                setAccountOpen(false);
+                setProfileNameInput(user.name || "");
+                setProfilePhoneInput(user.phone || "");
+                setProfileOpen(true);
+              }}
+            >
+              Profile & Addresses
+            </button>
             {user.role === "customer" && (
               <button type="button" onClick={() => {
                 setAccountOpen(false);
@@ -1103,6 +1192,7 @@ function App() {
         <section className="grid">
           {restaurants
             .filter((restaurant) => {
+              if (globalVegOnly && !restaurant.isPureVeg) return false;
               if (selectedCuisineFilter === "All") return true;
               if (selectedCuisineFilter === "Pure Veg") return restaurant.isPureVeg;
               if (selectedCuisineFilter === "Fast") return Number(restaurant.deliveryTime) <= 30;
@@ -1836,7 +1926,17 @@ function App() {
                 <h2>Delivery partner</h2>
                 <p className="muted">Claim an order to see its customer details.</p>
               </div>
-              <button type="button" className="close" onClick={() => setDeliveryOpen(false)}>×</button>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <button
+                  type="button"
+                  className={`duty-status-pill ${user?.isAvailable !== false ? "online" : "offline"}`}
+                  onClick={toggleRiderAvailability}
+                  title="Click to toggle active duty availability"
+                >
+                  <span>{user?.isAvailable !== false ? "🟢 Online" : "🔴 Offline"}</span>
+                </button>
+                <button type="button" className="close" onClick={() => setDeliveryOpen(false)}>×</button>
+              </div>
             </div>
             {partnerOrdersError && <p className="admin-stream-error" role="alert">{partnerOrdersError}</p>}
             {locationError && <p className="admin-stream-error" role="alert">{locationError}</p>}
@@ -2243,6 +2343,101 @@ function App() {
                 ))}
               </div>
             )}
+          </section>
+        </div>
+      )}
+
+      {/* Customer Profile & Address Manager Modal */}
+      {profileOpen && user && (
+        <div className="modal-backdrop" onMouseDown={() => setProfileOpen(false)}>
+          <section className="profile-modal" onMouseDown={(e) => e.stopPropagation()}>
+            <div className="admin-dashboard-heading">
+              <div>
+                <h2>Profile & Saved Addresses</h2>
+                <p className="muted">{user.email} · {String(user.role).replace("_", " ").toUpperCase()}</p>
+              </div>
+              <button type="button" className="close" onClick={() => setProfileOpen(false)}>×</button>
+            </div>
+
+            {/* Profile Info Form */}
+            <form className="profile-section-card" onSubmit={updateProfile}>
+              <h3>Personal Details</h3>
+              <div className="admin-form-grid" style={{ marginBottom: 10 }}>
+                <div>
+                  <label>Full Name</label>
+                  <input
+                    value={profileNameInput}
+                    onChange={(e) => setProfileNameInput(e.target.value)}
+                    placeholder="Your Name"
+                    required
+                  />
+                </div>
+                <div>
+                  <label>Phone Number</label>
+                  <input
+                    value={profilePhoneInput}
+                    onChange={(e) => setProfilePhoneInput(e.target.value)}
+                    placeholder="10-digit mobile"
+                  />
+                </div>
+              </div>
+              <button type="submit" className="partner-action" style={{ padding: "6px 16px", fontSize: 12 }}>
+                Update Info
+              </button>
+            </form>
+
+            {/* Saved Addresses List */}
+            <div className="profile-section-card">
+              <h3>Saved Delivery Addresses ({(user.addresses || []).length})</h3>
+              {(!user.addresses || user.addresses.length === 0) ? (
+                <p className="muted" style={{ fontSize: 13 }}>No saved addresses yet.</p>
+              ) : (
+                <div style={{ maxHeight: 180, overflowY: "auto", marginBottom: 10 }}>
+                  {user.addresses.map((a) => (
+                    <div className="address-item-card" key={a._id || a.address}>
+                      <div>
+                        <span className="addr-label">{a.label || "Home"}</span>
+                        <span style={{ fontSize: 13, color: "#334155" }}>{a.address}</span>
+                      </div>
+                      {a._id && (
+                        <button
+                          type="button"
+                          className="addr-delete-btn"
+                          onClick={() => deleteProfileAddress(a._id)}
+                        >
+                          ✕ Delete
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Add New Address Sub-form */}
+              <form onSubmit={addProfileAddress} style={{ borderTop: "1px dashed #cbd5e1", paddingTop: 10 }}>
+                <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+                  <select
+                    value={profileAddrLabel}
+                    onChange={(e) => setProfileAddrLabel(e.target.value)}
+                    style={{ width: 100, padding: 6, borderRadius: 8, border: "1px solid #cbd5e1", fontSize: 12 }}
+                  >
+                    <option value="Home">Home</option>
+                    <option value="Office">Office</option>
+                    <option value="Other">Other</option>
+                  </select>
+                  <input
+                    value={profileAddrText}
+                    onChange={(e) => setProfileAddrText(e.target.value)}
+                    placeholder="Flat/House no, Area, Landmark, City..."
+                    style={{ flex: 1, padding: 6, borderRadius: 8, border: "1px solid #cbd5e1", fontSize: 12 }}
+                    required
+                  />
+                </div>
+                <button type="submit" className="partner-action" style={{ padding: "6px 16px", fontSize: 12 }}>
+                  + Add Address
+                </button>
+              </form>
+            </div>
           </section>
         </div>
       )}
