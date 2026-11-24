@@ -2,13 +2,41 @@ require('dotenv').config();
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const { spawn } = require('node:child_process');
 
-const BASE_URL = 'http://127.0.0.1:5000';
+const PORT = process.env.UI_TEST_PORT || '5066';
+const BASE_URL = `http://127.0.0.1:${PORT}`;
+let serverProc;
+
+async function waitForServer(retries = 30) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      const res = await fetch(`${BASE_URL}/health`);
+      if (res.ok) return;
+    } catch (_) {}
+    await new Promise((r) => setTimeout(r, 300));
+  }
+  throw new Error(`Server failed to start on port ${PORT} within timeout`);
+}
 
 async function runInterfaceTests() {
   console.log('====================================================');
   console.log('🚀 TrueHomes Automated Interface & UI Verification Suite');
   console.log('====================================================\n');
+
+  // Check if server is already reachable on BASE_URL; if not, spawn it automatically
+  let spawnedHere = false;
+  try {
+    const probe = await fetch(`${BASE_URL}/health`);
+    if (!probe.ok) throw new Error('Not ready');
+  } catch (_) {
+    spawnedHere = true;
+    serverProc = spawn(process.execPath, ['server.js'], {
+      env: { ...process.env, PORT },
+      stdio: 'ignore'
+    });
+    await waitForServer();
+  }
 
   let passed = 0;
   let total = 0;
@@ -515,6 +543,10 @@ async function runInterfaceTests() {
     }
     await mongoose.disconnect();
   });
+
+  if (serverProc && !serverProc.killed) {
+    serverProc.kill('SIGTERM');
+  }
 
   console.log('\n====================================================');
   console.log(`📊 Test Results: ${passed} / ${total} tests passed (${Math.round((passed / total) * 100)}%)`);
