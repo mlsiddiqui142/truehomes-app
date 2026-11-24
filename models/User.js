@@ -14,7 +14,7 @@ const userSchema = new mongoose.Schema(
     },
     phone: { type: String, trim: true, match: [/^[0-9+\s-]{10,15}$/, 'Please provide a valid phone number'] },
     passwordHash: { type: String, required: true, select: false },
-    role: { type: String, enum: ['customer', 'admin'], default: 'customer' }
+    role: { type: String, enum: ['customer', 'admin', 'delivery_partner'], default: 'customer' }
   },
   { timestamps: true }
 );

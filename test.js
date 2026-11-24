@@ -308,7 +308,44 @@ describe('TrueHomes Full-Stack & Cyber-Security Automated Suite', () => {
     assert.ok(orders.some((o) => o.orderCode === createdOrderCode));
   });
 
-  it('13. Enforces brute-force rate limit (429) on repeated failed logins', async () => {
+  it('13. Supports direct login probes and authenticated sessions, blocking passwordless admin', async () => {
+    const probeNoneRes = await fetch(`${BASE_URL}/api/auth/direct-login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: `nonexistent_${runId}@truehomes.test`, password: '__PROBE_ONLY__' })
+    });
+    const probeNoneData = await probeNoneRes.json();
+    assert.equal(probeNoneRes.status, 200);
+    assert.equal(probeNoneData.exists, false);
+
+    const probeCustRes = await fetch(`${BASE_URL}/api/auth/direct-login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: customerEmail, password: '__PROBE_ONLY__' })
+    });
+    const probeCustData = await probeCustRes.json();
+    assert.equal(probeCustRes.status, 200);
+    assert.equal(probeCustData.exists, true);
+
+    const directLoginRes = await fetch(`${BASE_URL}/api/auth/direct-login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: customerEmail, password: strongPassword })
+    });
+    const directLoginData = await directLoginRes.json();
+    assert.equal(directLoginRes.status, 200);
+    assert.ok(directLoginData.token);
+    assert.equal(directLoginData.user.email, customerEmail);
+
+    const badAdminDirectRes = await fetch(`${BASE_URL}/api/auth/direct-login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: adminEmail, password: '' })
+    });
+    assert.equal(badAdminDirectRes.status, 401);
+  });
+
+  it('14. Enforces brute-force rate limit (429) on repeated failed logins', async () => {
     let hit429 = false;
     for (let i = 0; i < 12; i++) {
       const res = await fetch(`${BASE_URL}/api/auth/login`, {

@@ -152,13 +152,17 @@ app.post('/api/auth/register', authLimiter, async (req, res) => {
       process.env.ADMIN_EMAIL &&
       email === process.env.ADMIN_EMAIL.trim().toLowerCase();
 
+    const assignedRole = isAdminEmail
+      ? 'admin'
+      : (req.body.role === 'delivery_partner' ? 'delivery_partner' : 'customer');
+
     const passwordHash = await bcrypt.hash(password, 12);
     const user = await User.create({
       name,
       email,
       phone,
       passwordHash,
-      role: isAdminEmail ? 'admin' : 'customer'
+      role: assignedRole
     });
     const token = signUserToken(user);
 
@@ -197,6 +201,56 @@ app.post('/api/auth/login', authLimiter, async (req, res) => {
     });
   } catch (err) {
     return res.status(500).json({ error: 'Authentication failed' });
+  }
+});
+
+app.post('/api/auth/direct-login', authLimiter, async (req, res) => {
+  try {
+    const email = typeof req.body.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+    const password = typeof req.body.password === 'string' ? req.body.password : '';
+
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).json({ error: 'Valid email address is required' });
+    }
+
+    const user = await User.findOne({ email }).select('+passwordHash');
+
+    if (password === '__PROBE_ONLY__') {
+      return res.status(200).json({
+        exists: Boolean(user),
+        email,
+        role: user ? user.role : null
+      });
+    }
+
+    if (!user) {
+      return res.status(404).json({ error: 'No account found with this email in database' });
+    }
+
+    // Admin security check: never allow passwordless login for admin accounts
+    if (user.role === 'admin') {
+      if (!password) {
+        return res.status(401).json({ error: 'Admin accounts require standard password sign-in' });
+      }
+      const isMatch = await bcrypt.compare(password, user.passwordHash);
+      if (!isMatch) {
+        return res.status(401).json({ error: 'Invalid password for admin account' });
+      }
+    } else if (password) {
+      // If a password was provided for customer or delivery partner, verify it
+      const isMatch = await bcrypt.compare(password, user.passwordHash);
+      if (!isMatch) {
+        return res.status(401).json({ error: 'Invalid password for this account' });
+      }
+    }
+
+    const token = signUserToken(user);
+    return res.status(200).json({
+      token,
+      user: { id: user._id, name: user.name, email: user.email, phone: user.phone, role: user.role }
+    });
+  } catch (err) {
+    return res.status(500).json({ error: 'Direct login failed' });
   }
 });
 
