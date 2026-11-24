@@ -115,6 +115,13 @@ function requireAdmin(req, res, next) {
   return next();
 }
 
+function requireDeliveryPartner(req, res, next) {
+  if (!req.user || (req.user.role !== 'delivery_partner' && req.user.role !== 'admin')) {
+    return res.status(403).json({ error: 'Delivery partner privileges required' });
+  }
+  return next();
+}
+
 function escapeRegex(text) {
   return text.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&');
 }
@@ -514,6 +521,73 @@ app.patch('/api/admin/orders/:id/status', requireAuth, requireAdmin, async (req,
     return res.json(order);
   } catch (err) {
     return res.status(400).json({ error: 'Failed to update order status' });
+  }
+});
+
+app.get('/api/delivery/orders', requireAuth, requireDeliveryPartner, async (req, res) => {
+  try {
+    const orders = await Order.find({
+      $or: [
+        { status: 'PREPARING' },
+        { assignedPartnerId: req.user.id }
+      ]
+    }).sort({ createdAt: -1 }).limit(40);
+    return res.json(orders);
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to fetch delivery orders' });
+  }
+});
+
+app.patch('/api/delivery/orders/:id/claim', requireAuth, requireDeliveryPartner, async (req, res) => {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ error: 'Invalid order ID' });
+    }
+
+    const order = await Order.findById(req.params.id);
+    if (!order) return res.status(404).json({ error: 'Order not found' });
+
+    if (order.assignedPartnerId && order.assignedPartnerId.toString() !== req.user.id) {
+      return res.status(409).json({ error: 'Order already claimed by another delivery partner' });
+    }
+
+    const partner = await User.findById(req.user.id);
+    order.assignedPartnerId = req.user.id;
+    order.assignedPartnerName = partner ? partner.name : 'Delivery Partner';
+    await order.save();
+
+    return res.json(order);
+  } catch (err) {
+    return res.status(400).json({ error: 'Failed to claim delivery order' });
+  }
+});
+
+app.patch('/api/delivery/orders/:id/status', requireAuth, requireDeliveryPartner, async (req, res) => {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ error: 'Invalid order ID' });
+    }
+
+    const order = await Order.findById(req.params.id);
+    if (!order) return res.status(404).json({ error: 'Order not found' });
+
+    if (req.user.role !== 'admin' && String(order.assignedPartnerId) !== String(req.user.id)) {
+      return res.status(403).json({ error: 'You must claim this order before updating its status' });
+    }
+
+    const allowedStatuses = ['OUT_FOR_DELIVERY', 'DELIVERED'];
+    const status = String(req.body.status || '').toUpperCase();
+
+    if (!allowedStatuses.includes(status)) {
+      return res.status(400).json({ error: 'Invalid delivery status update. Allowed: OUT_FOR_DELIVERY, DELIVERED' });
+    }
+
+    order.status = status;
+    await order.save();
+
+    return res.json(order);
+  } catch (err) {
+    return res.status(400).json({ error: 'Failed to update delivery status' });
   }
 });
 

@@ -27,6 +27,8 @@ const orderSchema = new mongoose.Schema(
     paymentStatus: { type: String, enum: ['PENDING', 'PAID', 'COD'], default: 'PENDING' },
     razorpayOrderId: { type: String, default: null },
     razorpayPaymentId: { type: String, default: null },
+    assignedPartnerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+    assignedPartnerName: { type: String, default: null },
     status: {
       type: String,
       enum: ['CONFIRMED', 'PREPARING', 'OUT_FOR_DELIVERY', 'DELIVERED'],

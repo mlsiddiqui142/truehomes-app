@@ -14,11 +14,15 @@ const BASE_URL = `http://127.0.0.1:${TEST_PORT}`;
 const runId = Date.now();
 const adminEmail = (process.env.ADMIN_EMAIL || `admin_${runId}@truehomes.test`).trim().toLowerCase();
 const customerEmail = `customer_${runId}@truehomes.test`;
+const partnerEmail = `partner_${runId}@truehomes.test`;
+const partner2Email = `partner2_${runId}@truehomes.test`;
 const strongPassword = 'TestPassword@2026';
 
 let serverProc;
 let adminToken = '';
 let customerToken = '';
+let partnerToken = '';
+let partner2Token = '';
 let createdRestaurantId = '';
 let createdMenuItemId = '';
 let createdOrderId = '';
@@ -56,7 +60,7 @@ describe('TrueHomes Full-Stack & Cyber-Security Automated Suite', () => {
     if (serverProc && !serverProc.killed) {
       serverProc.kill('SIGTERM');
     }
-    await User.deleteOne({ email: customerEmail });
+    await User.deleteMany({ email: { $in: [customerEmail, partnerEmail, partner2Email] } });
     if (createdAdminDuringTest) {
       await User.deleteOne({ email: adminEmail });
     }
@@ -345,7 +349,100 @@ describe('TrueHomes Full-Stack & Cyber-Security Automated Suite', () => {
     assert.equal(badAdminDirectRes.status, 401);
   });
 
-  it('14. Enforces brute-force rate limit (429) on repeated failed logins', async () => {
+  it('14. Delivery partner workflow: blocks customer, permits claim, conflict check, and status update', async () => {
+    const p1Res = await fetch(`${BASE_URL}/api/auth/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: 'Speedy Rider 1',
+        email: partnerEmail,
+        phone: '+91 9888877771',
+        password: strongPassword,
+        role: 'delivery_partner'
+      })
+    });
+    const p1Data = await p1Res.json();
+    assert.equal(p1Res.status, 201);
+    assert.equal(p1Data.user.role, 'delivery_partner');
+    partnerToken = p1Data.token;
+
+    const p2Res = await fetch(`${BASE_URL}/api/auth/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: 'Speedy Rider 2',
+        email: partner2Email,
+        phone: '+91 9888877772',
+        password: strongPassword,
+        role: 'delivery_partner'
+      })
+    });
+    const p2Data = await p2Res.json();
+    assert.equal(p2Res.status, 201);
+    partner2Token = p2Data.token;
+
+    const custBlock = await fetch(`${BASE_URL}/api/delivery/orders`, {
+      headers: { Authorization: `Bearer ${customerToken}` }
+    });
+    assert.equal(custBlock.status, 403);
+
+    await fetch(`${BASE_URL}/api/admin/orders/${createdOrderId}/status`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${adminToken}`
+      },
+      body: JSON.stringify({ status: 'PREPARING' })
+    });
+
+    const fetchRes = await fetch(`${BASE_URL}/api/delivery/orders`, {
+      headers: { Authorization: `Bearer ${partnerToken}` }
+    });
+    const fetchOrders = await fetchRes.json();
+    assert.equal(fetchRes.status, 200);
+    assert.ok(Array.isArray(fetchOrders));
+    assert.ok(fetchOrders.some((o) => o._id === createdOrderId));
+
+    const claimRes = await fetch(`${BASE_URL}/api/delivery/orders/${createdOrderId}/claim`, {
+      method: 'PATCH',
+      headers: { Authorization: `Bearer ${partnerToken}` }
+    });
+    const claimData = await claimRes.json();
+    assert.equal(claimRes.status, 200);
+    assert.equal(claimData.assignedPartnerName, 'Speedy Rider 1');
+
+    const conflictRes = await fetch(`${BASE_URL}/api/delivery/orders/${createdOrderId}/claim`, {
+      method: 'PATCH',
+      headers: { Authorization: `Bearer ${partner2Token}` }
+    });
+    assert.equal(conflictRes.status, 409);
+
+    const outRes = await fetch(`${BASE_URL}/api/delivery/orders/${createdOrderId}/status`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${partnerToken}`
+      },
+      body: JSON.stringify({ status: 'OUT_FOR_DELIVERY' })
+    });
+    const outData = await outRes.json();
+    assert.equal(outRes.status, 200);
+    assert.equal(outData.status, 'OUT_FOR_DELIVERY');
+
+    const delRes = await fetch(`${BASE_URL}/api/delivery/orders/${createdOrderId}/status`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${partnerToken}`
+      },
+      body: JSON.stringify({ status: 'DELIVERED' })
+    });
+    const delData = await delRes.json();
+    assert.equal(delRes.status, 200);
+    assert.equal(delData.status, 'DELIVERED');
+  });
+
+  it('15. Enforces brute-force rate limit (429) on repeated failed logins', async () => {
     let hit429 = false;
     for (let i = 0; i < 12; i++) {
       const res = await fetch(`${BASE_URL}/api/auth/login`, {

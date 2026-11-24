@@ -143,6 +143,15 @@
           </button>
 
           <button
+            id="deliveryNavBtn"
+            onclick="openDeliveryModal()"
+            class="hidden items-center gap-1.5 text-sm font-bold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 px-3 py-2 rounded-xl transition"
+          >
+            <i class="fa-solid fa-person-biking"></i>
+            <span class="hidden sm:inline">Rider Portal</span>
+          </button>
+
+          <button
             id="authNavBtn"
             onclick="handleAuthNavClick()"
             class="flex items-center gap-1.5 text-sm font-semibold text-slate-700 hover:text-orange-600 px-3 py-2 rounded-xl hover:bg-slate-100 transition"
@@ -1021,6 +1030,75 @@
       </div>
     </div>
 
+    <!-- DELIVERY PARTNER DASHBOARD MODAL -->
+    <div
+      id="deliveryModal"
+      class="fixed inset-0 z-50 hidden bg-slate-900/70 backdrop-blur-xs flex items-center justify-center p-4"
+    >
+      <div
+        class="bg-white w-full max-w-3xl max-h-[90vh] rounded-3xl shadow-2xl overflow-hidden flex flex-col"
+      >
+        <!-- Header -->
+        <div
+          class="p-5 border-b border-slate-200 flex items-center justify-between bg-emerald-700 text-white"
+        >
+          <div class="flex items-center gap-3">
+            <div
+              class="w-10 h-10 rounded-2xl bg-white/20 flex items-center justify-center text-lg"
+            >
+              <i class="fa-solid fa-person-biking"></i>
+            </div>
+            <div>
+              <h3 class="font-extrabold text-base tracking-tight">
+                TrueHomes Delivery Portal
+              </h3>
+              <p class="text-xs text-emerald-100">
+                Active orders ready for pickup and real-time delivery management
+              </p>
+            </div>
+          </div>
+          <div class="flex items-center gap-2">
+            <button
+              type="button"
+              onclick="loadDeliveryOrders()"
+              class="px-3 py-1.5 rounded-xl bg-white/20 hover:bg-white/30 text-white text-xs font-bold transition flex items-center gap-1.5"
+            >
+              <i class="fa-solid fa-rotate"></i>
+              <span>Refresh</span>
+            </button>
+            <button
+              type="button"
+              onclick="closeModal('deliveryModal')"
+              class="w-8 h-8 rounded-full bg-white/20 hover:bg-white/30 flex items-center justify-center text-white transition"
+            >
+              <i class="fa-solid fa-xmark"></i>
+            </button>
+          </div>
+        </div>
+
+        <!-- Rider Metrics Bar -->
+        <div class="p-4 bg-emerald-50 border-b border-emerald-100 grid grid-cols-3 gap-3">
+          <div class="bg-white p-3 rounded-2xl border border-emerald-100 shadow-xs">
+            <span class="text-[10px] font-bold uppercase tracking-wider text-slate-400">Total Active</span>
+            <p id="deliveryActiveCount" class="text-lg font-extrabold text-slate-900">0</p>
+          </div>
+          <div class="bg-white p-3 rounded-2xl border border-emerald-100 shadow-xs">
+            <span class="text-[10px] font-bold uppercase tracking-wider text-slate-400">Delivered Today</span>
+            <p id="deliveryCompletedCount" class="text-lg font-extrabold text-emerald-700">0</p>
+          </div>
+          <div class="bg-white p-3 rounded-2xl border border-emerald-100 shadow-xs">
+            <span class="text-[10px] font-bold uppercase tracking-wider text-slate-400">Tips Earned</span>
+            <p id="deliveryTipsEarned" class="text-lg font-extrabold text-orange-600">₹0</p>
+          </div>
+        </div>
+
+        <!-- Orders List Container -->
+        <div id="deliveryOrdersList" class="p-5 overflow-y-auto space-y-3 flex-1 bg-slate-50">
+          <div class="text-center py-10 text-slate-400 text-xs">Loading delivery requests...</div>
+        </div>
+      </div>
+    </div>
+
     <!-- TOAST NOTIFICATION -->
     <div
       id="toast"
@@ -1343,19 +1421,27 @@
       function updateAuthUI() {
         const label = document.getElementById("authNavLabel");
         const adminBtn = document.getElementById("adminNavBtn");
+        const deliveryBtn = document.getElementById("deliveryNavBtn");
         if (state.user) {
           label.textContent = state.user.name.split(" ")[0];
-          if (state.user.role === "admin") {
-            adminBtn.classList.remove("hidden");
-            adminBtn.classList.add("flex");
-          } else {
-            adminBtn.classList.add("hidden");
-            adminBtn.classList.remove("flex");
+          const isAdmin = state.user.role === "admin";
+          const isDelivery = state.user.role === "delivery_partner" || isAdmin;
+
+          adminBtn.classList.toggle("hidden", !isAdmin);
+          adminBtn.classList.toggle("flex", isAdmin);
+
+          if (deliveryBtn) {
+            deliveryBtn.classList.toggle("hidden", !isDelivery);
+            deliveryBtn.classList.toggle("flex", isDelivery);
           }
         } else {
           label.textContent = "Sign In";
           adminBtn.classList.add("hidden");
           adminBtn.classList.remove("flex");
+          if (deliveryBtn) {
+            deliveryBtn.classList.add("hidden");
+            deliveryBtn.classList.remove("flex");
+          }
         }
       }
 
@@ -2232,6 +2318,161 @@ function reorderPastOrder(orderId) {
       closeModal('profileModal');
       toggleCartDrawer(true);
       showToast(`Loaded items from ${past.orderCode} into cart`);
+    }
+
+    // --- DELIVERY PARTNER PORTAL ---
+    function openDeliveryModal() {
+      document.getElementById("deliveryModal").classList.remove("hidden");
+      loadDeliveryOrders();
+    }
+
+    async function loadDeliveryOrders() {
+      const list = document.getElementById("deliveryOrdersList");
+      const activeEl = document.getElementById("deliveryActiveCount");
+      const completedEl = document.getElementById("deliveryCompletedCount");
+      const tipsEl = document.getElementById("deliveryTipsEarned");
+
+      if (!state.token) {
+        list.innerHTML = `<p class="text-xs text-slate-500">Please sign in as a delivery partner to view tasks.</p>`;
+        return;
+      }
+
+      try {
+        const res = await fetch("/api/delivery/orders", {
+          headers: { Authorization: `Bearer ${state.token}` }
+        });
+        const orders = await res.json();
+        if (!res.ok) {
+          list.innerHTML = `<p class="text-xs text-rose-600">${escapeHTML(orders.error || "Failed to load orders")}</p>`;
+          return;
+        }
+
+        const myId = state.user ? (state.user.id || state.user._id) : null;
+        let activeCount = 0;
+        let completedCount = 0;
+        let totalTips = 0;
+
+        orders.forEach(o => {
+          if (o.status === 'DELIVERED') {
+            completedCount++;
+            totalTips += (Number(o.tip) || 0);
+          } else {
+            activeCount++;
+          }
+        });
+
+        if (activeEl) activeEl.textContent = activeCount;
+        if (completedEl) completedEl.textContent = completedCount;
+        if (tipsEl) tipsEl.textContent = `₹${totalTips}`;
+
+        if (!orders.length) {
+          list.innerHTML = `
+            <div class="text-center py-12 text-slate-400">
+              <i class="fa-solid fa-clipboard-check text-4xl text-slate-300 mb-2"></i>
+              <p class="text-sm font-bold text-slate-700">No active delivery requests</p>
+              <p class="text-xs text-slate-400 mt-1">Orders in 'Preparing' status from kitchens will appear here automatically.</p>
+            </div>
+          `;
+          return;
+        }
+
+        list.innerHTML = orders.map(o => {
+          const isMine = String(o.assignedPartnerId) === String(myId);
+          const isAvailable = !o.assignedPartnerId && o.status === 'PREPARING';
+          const isOut = o.status === 'OUT_FOR_DELIVERY';
+          const isDelivered = o.status === 'DELIVERED';
+
+          const badgeClass =
+            o.status === 'DELIVERED' ? 'bg-emerald-100 text-emerald-800' :
+            o.status === 'OUT_FOR_DELIVERY' ? 'bg-blue-100 text-blue-800' :
+            'bg-amber-100 text-amber-800';
+
+          return `
+            <div class="p-4 bg-white rounded-2xl border border-slate-200 shadow-xs space-y-3">
+              <div class="flex items-center justify-between gap-2">
+                <div>
+                  <span class="font-extrabold text-sm text-slate-900">${escapeHTML(o.orderCode)}</span>
+                  <span class="text-xs text-slate-400 ml-2">₹${escapeHTML(o.grandTotal)}</span>
+                  ${o.tip ? `<span class="ml-2 px-2 py-0.5 rounded-full bg-orange-100 text-orange-700 text-[10px] font-extrabold">+₹${escapeHTML(o.tip)} Tip</span>` : ''}
+                </div>
+                <span class="px-2.5 py-1 rounded-full text-[11px] font-bold ${badgeClass}">
+                  ${escapeHTML(o.status.replace(/_/g, ' '))}
+                </span>
+              </div>
+
+              <div class="text-xs text-slate-600 space-y-1 bg-slate-50 p-2.5 rounded-xl border border-slate-100">
+                <div><strong class="text-slate-800">Kitchen:</strong> ${escapeHTML(o.restaurantName || 'TrueHomes Kitchen')}</div>
+                <div><strong class="text-slate-800">Deliver To:</strong> ${escapeHTML(o.customerName)} (${escapeHTML(o.customerPhone)})</div>
+                <div class="truncate"><strong class="text-slate-800">Address:</strong> ${escapeHTML(o.deliveryAddress)}</div>
+              </div>
+
+              <div class="flex items-center justify-between gap-2 pt-1">
+                <span class="text-[11px] text-slate-400">
+                  ${isMine ? '<span class="text-emerald-600 font-bold"><i class="fa-solid fa-check"></i> Assigned to You</span>' : (o.assignedPartnerName ? `Assigned: ${escapeHTML(o.assignedPartnerName)}` : '<span class="text-amber-600 font-semibold">Available for claim</span>')}
+                </span>
+                <div class="flex items-center gap-2">
+                  ${isAvailable ? `
+                    <button type="button" onclick="claimDeliveryOrder('${o._id}')" class="px-3.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold transition flex items-center gap-1.5 shadow-xs">
+                      <i class="fa-solid fa-hand-holding-hand"></i> Claim Order
+                    </button>
+                  ` : ''}
+                  ${isMine && o.status === 'PREPARING' ? `
+                    <button type="button" onclick="updateDeliveryStatus('${o._id}', 'OUT_FOR_DELIVERY')" class="px-3.5 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold transition flex items-center gap-1.5 shadow-xs">
+                      <i class="fa-solid fa-motorcycle"></i> Start Delivery
+                    </button>
+                  ` : ''}
+                  ${isMine && isOut ? `
+                    <button type="button" onclick="updateDeliveryStatus('${o._id}', 'DELIVERED')" class="px-3.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold transition flex items-center gap-1.5 shadow-xs">
+                      <i class="fa-solid fa-circle-check"></i> Mark Delivered
+                    </button>
+                  ` : ''}
+                  ${isDelivered ? `
+                    <span class="text-xs font-bold text-emerald-600 flex items-center gap-1">
+                      <i class="fa-solid fa-check-double"></i> Delivered
+                    </span>
+                  ` : ''}
+                </div>
+              </div>
+            </div>
+          `;
+        }).join('');
+      } catch (_) {
+        list.innerHTML = `<p class="text-xs text-rose-600">Failed to load delivery orders</p>`;
+      }
+    }
+
+    async function claimDeliveryOrder(id) {
+      try {
+        const res = await fetch(`/api/delivery/orders/${id}/claim`, {
+          method: 'PATCH',
+          headers: { Authorization: `Bearer ${state.token}` }
+        });
+        const data = await res.json();
+        if (!res.ok) return showToast(data.error || 'Could not claim order');
+        showToast(`Claimed order ${data.orderCode}!`);
+        loadDeliveryOrders();
+      } catch (_) {
+        showToast('Network error while claiming order');
+      }
+    }
+
+    async function updateDeliveryStatus(id, status) {
+      try {
+        const res = await fetch(`/api/delivery/orders/${id}/status`, {
+          method: 'PATCH',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${state.token}`
+          },
+          body: JSON.stringify({ status })
+        });
+        const data = await res.json();
+        if (!res.ok) return showToast(data.error || 'Failed to update delivery status');
+        showToast(`Order status updated to ${status.replace(/_/g, ' ')}`);
+        loadDeliveryOrders();
+      } catch (_) {
+        showToast('Network error updating delivery status');
+      }
     }
 
     // --- ADMIN CONTROL CENTER ---
