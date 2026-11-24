@@ -2982,6 +2982,155 @@ document.addEventListener('click', (e) => {
     setTimeout(replaceKitchenDropdownWithText, 120);
   }
 });
+
+/* TH_THREE_ROLE_SIGNIN */
+let thSelectedRole = 'user';
+
+function setSignInRoleSection(role) {
+  thSelectedRole = role;
+  ['admin', 'user', 'delivery_partner'].forEach((r) => {
+    const tab = document.getElementById('thRoleTab_' + r);
+    if (!tab) return;
+    const active = r === role;
+    tab.className = active
+      ? 'flex-1 py-2 px-2.5 rounded-xl text-xs font-extrabold bg-orange-600 text-white shadow-sm transition'
+      : 'flex-1 py-2 px-2.5 rounded-xl text-xs font-bold bg-slate-100 text-slate-600 hover:bg-slate-200 transition';
+  });
+
+  const info = document.getElementById('thRoleDescription');
+  const directBox = document.getElementById('thDirectLoginBox');
+  if (info) {
+    if (role === 'admin') {
+      info.textContent = 'Root Admin Control: Manage live orders, kitchens, and custom menus.';
+    } else if (role === 'delivery_partner') {
+      info.textContent = 'Delivery Partner Portal: Pick up & update active deliveries. Existing partners can use Direct Login.';
+    } else {
+      info.textContent = 'Customer Account: Browse kitchens, reorder past meals & track live deliveries.';
+    }
+  }
+  if (directBox) {
+    directBox.classList.toggle('hidden', role === 'admin');
+  }
+  checkExistingAccountForDirectLogin();
+}
+
+async function checkExistingAccountForDirectLogin() {
+  const emailEl = document.querySelector('#authModal input[type="email"], #authModal input[name="email"]');
+  const statusEl = document.getElementById('thDbAccountStatus');
+  const directBtn = document.getElementById('thDirectLoginBtn');
+  if (!emailEl || !statusEl || !directBtn) return;
+
+  const email = (emailEl.value || '').trim().toLowerCase();
+  if (!email || !email.includes('@')) {
+    statusEl.textContent = 'Enter an email already in MongoDB for Direct Login.';
+    directBtn.disabled = true;
+    directBtn.classList.add('opacity-50', 'cursor-not-allowed');
+    return;
+  }
+
+  try {
+    const res = await fetch('/api/auth/direct-login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, role: thSelectedRole, password: '__PROBE_ONLY__' })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (data && data.exists) {
+      statusEl.textContent = 'Account found in database (' + email + '). Direct Login available!';
+      statusEl.className = 'text-[11px] font-bold text-emerald-700';
+      directBtn.disabled = false;
+      directBtn.classList.remove('opacity-50', 'cursor-not-allowed');
+    } else {
+      statusEl.textContent = 'No existing database record found yet for ' + email + '.';
+      statusEl.className = 'text-[11px] text-slate-500';
+      directBtn.disabled = true;
+      directBtn.classList.add('opacity-50', 'cursor-not-allowed');
+    }
+  } catch (_) {}
+}
+
+async function performDirectDatabaseLogin() {
+  const emailEl = document.querySelector('#authModal input[type="email"], #authModal input[name="email"]');
+  const pwEl = document.querySelector('#authModal input[type="password"], #authModal input[name="password"]');
+  const email = (emailEl && emailEl.value || '').trim().toLowerCase();
+  const password = (pwEl && pwEl.value || '');
+  if (!email) {
+    if (typeof showToast === 'function') showToast('Please enter your email address first');
+    return;
+  }
+
+  try {
+    const res = await fetch('/api/auth/direct-login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, role: thSelectedRole, password })
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      if (typeof showToast === 'function') showToast(data.error || 'Direct login failed');
+      return;
+    }
+    if (typeof state !== 'undefined' && data.token) {
+      state.token = data.token;
+      state.user = data.user;
+      try {
+        localStorage.setItem('truehomes_token', data.token);
+        localStorage.setItem('truehomes_user', JSON.stringify(data.user));
+      } catch (_) {}
+    }
+    if (typeof closeModal === 'function') closeModal('authModal');
+    if (typeof renderAuthUI === 'function') renderAuthUI();
+    if (typeof showToast === 'function') showToast('Signed in directly as ' + (data.user.role || thSelectedRole));
+  } catch (_) {
+    if (typeof showToast === 'function') showToast('Network error during direct login');
+  }
+}
+
+function mountThreeRoleSignIn() {
+  const modal = document.getElementById('authModal');
+  if (!modal || document.getElementById('thRoleSelectorBar')) return;
+
+  const form = modal.querySelector('form') || modal.querySelector('.p-6') || modal;
+  const bar = document.createElement('div');
+  bar.id = 'thRoleSelectorBar';
+  bar.className = 'mb-3 space-y-2';
+  bar.innerHTML = `
+    <div class="flex items-center gap-1.5 p-1 rounded-2xl bg-slate-100">
+      <button id="thRoleTab_admin" type="button" onclick="setSignInRoleSection('admin')" class="flex-1 py-2 px-2.5 rounded-xl text-xs font-bold bg-slate-100 text-slate-600 hover:bg-slate-200 transition">Admin</button>
+      <button id="thRoleTab_user" type="button" onclick="setSignInRoleSection('user')" class="flex-1 py-2 px-2.5 rounded-xl text-xs font-extrabold bg-orange-600 text-white shadow-sm transition">User</button>
+      <button id="thRoleTab_delivery_partner" type="button" onclick="setSignInRoleSection('delivery_partner')" class="flex-1 py-2 px-2.5 rounded-xl text-xs font-bold bg-slate-100 text-slate-600 hover:bg-slate-200 transition">Delivery Partner</button>
+    </div>
+    <p id="thRoleDescription" class="text-[11px] text-slate-500">Customer Account: Browse kitchens, reorder past meals & track live deliveries.</p>
+    <div id="thDirectLoginBox" class="p-3 rounded-2xl border border-emerald-200 bg-emerald-50/60 space-y-2">
+      <div class="flex items-center justify-between gap-2">
+        <span class="text-xs font-extrabold text-emerald-900">Direct Login (Existing DB User / Delivery Partner)</span>
+        <button id="thDirectLoginBtn" type="button" onclick="performDirectDatabaseLogin()" disabled class="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold opacity-50 cursor-not-allowed transition">
+          Direct Login
+        </button>
+      </div>
+      <p id="thDbAccountStatus" class="text-[11px] text-slate-500">Enter an email already in MongoDB for Direct Login.</p>
+    </div>
+  `;
+
+  form.insertBefore(bar, form.firstChild);
+
+  const emailEl = modal.querySelector('input[type="email"], input[name="email"]');
+  if (emailEl) {
+    emailEl.addEventListener('input', checkExistingAccountForDirectLogin);
+    emailEl.addEventListener('blur', checkExistingAccountForDirectLogin);
+  }
+  setSignInRoleSection('user');
+}
+
+document.addEventListener('DOMContentLoaded', () => setTimeout(mountThreeRoleSignIn, 300));
+document.addEventListener('click', (e) => {
+  if (e.target && e.target.closest && (e.target.closest('[onclick*="authModal"]') || /sign in/i.test(e.target.textContent || ''))) {
+    setTimeout(() => {
+      mountThreeRoleSignIn();
+      checkExistingAccountForDirectLogin();
+    }, 120);
+  }
+});
 </script>
     if ('serviceWorker' in navigator) { window.addEventListener('load', () => {
     navigator.serviceWorker.register('/service-worker.js').catch(() => {}); });
