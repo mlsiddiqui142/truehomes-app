@@ -4,6 +4,8 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>TrueHomes — Homestyle & Top Rated Food Delivery</title>
+    <meta name="theme-color" content="#ea580c" />
+    <link rel="manifest" href="/manifest.json" />
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -2391,5 +2393,8 @@
         }
       }
     </script>
+    if ('serviceWorker' in navigator) { window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/service-worker.js').catch(() => {}); });
+    }
   </body>
 </html>

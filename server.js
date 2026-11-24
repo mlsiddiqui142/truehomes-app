@@ -42,16 +42,8 @@ app.use((req, res, next) => { if (req.body) mongoSanitize.sanitize(req.body); if
 
 app.get('/health', (req, res) => {
   res.set('Cache-Control', 'no-store');
-  const isDbConnected = mongoose.connection.readyState === 1;
-  if (!isDbConnected) {
-    return res.status(503).json({ status: 'degraded', service: 'TrueHomes', db: 'disconnected' });
-  }
-  return res.status(200).json({
-    status: 'ok',
-    service: 'TrueHomes',
-    db: 'connected',
-    uptimeSeconds: Math.floor(process.uptime())
-  });
+  if (mongoose.connection.readyState !== 1) return res.status(503).json({ status: 'error' });
+  return res.status(200).json({ status: 'ok' });
 });
 
 const apiLimiter = rateLimit({

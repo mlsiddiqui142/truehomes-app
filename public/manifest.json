@@ -1,0 +1,25 @@
+{
+  "name": "TrueHomes — Homestyle & Top Rated Food Delivery",
+  "short_name": "TrueHomes",
+  "description": "Homestyle thalis, authentic biryanis, and neighborhood favorites delivered fresh.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#f8fafc",
+  "theme_color": "#ea580c",
+  "icons": [
+    {
+      "src": "https://images.unsplash.com/photo-1504674900247-0877df9cc836?w=192&q=80",
+      "sizes": "192x192",
+      "type": "image/jpeg",
+      "purpose": "any"
+    },
+    {
+      "src": "https://images.unsplash.com/photo-1504674900247-0877df9cc836?w=512&q=80",
+      "sizes": "512x512",
+      "type": "image/jpeg",
+      "purpose": "any"
+    }
+  ]
+}

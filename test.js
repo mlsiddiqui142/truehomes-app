@@ -74,7 +74,6 @@ describe('TrueHomes Full-Stack & Cyber-Security Automated Suite', () => {
     const data = await res.json();
     assert.equal(res.status, 200);
     assert.equal(data.status, 'ok');
-    assert.equal(data.db, 'connected');
   });
 
   it('2. Security headers (Helmet CSP & X-Content-Type-Options) are present', async () => {
