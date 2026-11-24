@@ -2061,7 +2061,8 @@
       }
 
       // --- LIVE ORDER TRACKING ---
-      function openTrackModal(orderObj = null) {
+      function openTrackModal(orderObj = null, isPollRefresh = false) {
+      if (!isPollRefresh && orderObj = null && orderObj = null.orderCode) startTrackAutoPoll(orderObj = null.orderCode);
         if (orderObj) state.activeOrder = orderObj;
         document.getElementById("trackModal").classList.remove("hidden");
         if (state.activeOrder) {
@@ -2192,6 +2193,13 @@ function saveDeliveryAddress(a) {
   } catch (_) {}
 }
 document.addEventListener('DOMContentLoaded', loadSavedAddress);
+/* TH_AUTO_SAVE_ADDR */
+document.addEventListener('change', (e) => {
+  if (e.target && (e.target.id === 'checkoutAddress' || e.target.name === 'address')) {
+    saveDeliveryAddress(e.target.value);
+  }
+});
+
 function reorderPastOrder(orderId) {
       const past = (state._historyOrders || []).find((o) => o._id === orderId);
       if (!past || !past.items?.length) return;
@@ -2441,7 +2449,33 @@ function reorderPastOrder(orderId) {
           populateAdminKitchenControls();
         }
       }
-    </script>
+    
+let TH_TRACK_POLL_TIMER = null;
+function startTrackAutoPoll(orderCode) {
+  stopTrackAutoPoll();
+  if (!orderCode) return;
+  TH_TRACK_POLL_TIMER = setInterval(async () => {
+    const modal = document.getElementById('trackModal');
+    if (!modal || modal.classList.contains('hidden')) {
+      stopTrackAutoPoll();
+      return;
+    }
+    try {
+      const res = await fetch('/api/orders/' + encodeURIComponent(orderCode));
+      if (!res.ok) return;
+      const latest = await res.json();
+      if (typeof openTrackModal === 'function') openTrackModal(latest, true);
+      if (latest.status === 'DELIVERED' || latest.status === 'CANCELLED') stopTrackAutoPoll();
+    } catch (_) {}
+  }, 10000);
+}
+function stopTrackAutoPoll() {
+  if (TH_TRACK_POLL_TIMER) {
+    clearInterval(TH_TRACK_POLL_TIMER);
+    TH_TRACK_POLL_TIMER = null;
+  }
+}
+</script>
     if ('serviceWorker' in navigator) { window.addEventListener('load', () => {
     navigator.serviceWorker.register('/service-worker.js').catch(() => {}); });
     }
