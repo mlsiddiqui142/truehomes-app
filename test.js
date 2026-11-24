@@ -442,7 +442,39 @@ describe('TrueHomes Full-Stack & Cyber-Security Automated Suite', () => {
     assert.equal(delData.status, 'DELIVERED');
   });
 
-  it('15. Enforces brute-force rate limit (429) on repeated failed logins', async () => {
+  it('15. Streams real-time order status updates over Server-Sent Events (SSE)', async () => {
+    const sseRes = await fetch(`${BASE_URL}/api/orders/${createdOrderCode}/stream`);
+    assert.equal(sseRes.status, 200);
+    assert.ok(sseRes.headers.get('content-type')?.includes('text/event-stream'));
+
+    const reader = sseRes.body.getReader();
+    const decoder = new TextDecoder();
+
+    // 1. Initial snapshot
+    const firstChunk = await reader.read();
+    const firstText = decoder.decode(firstChunk.value);
+    assert.ok(firstText.includes('data:'));
+    assert.ok(firstText.includes(createdOrderCode));
+
+    // 2. Trigger status broadcast
+    await fetch(`${BASE_URL}/api/admin/orders/${createdOrderId}/status`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${adminToken}`
+      },
+      body: JSON.stringify({ status: 'PREPARING' })
+    });
+
+    // 3. Read broadcasted update
+    const secondChunk = await reader.read();
+    const secondText = decoder.decode(secondChunk.value);
+    assert.ok(secondText.includes('PREPARING'));
+
+    await reader.cancel();
+  });
+
+  it('16. Enforces brute-force rate limit (429) on repeated failed logins', async () => {
     let hit429 = false;
     for (let i = 0; i < 12; i++) {
       const res = await fetch(`${BASE_URL}/api/auth/login`, {

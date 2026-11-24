@@ -1396,6 +1396,9 @@
 
       function closeModal(id) {
         document.getElementById(id).classList.add("hidden");
+        if (id === "trackModal" && typeof disconnectTrackLiveStream === "function") {
+          disconnectTrackLiveStream();
+        }
       }
 
       // --- AUTH & SESSION ---
@@ -2146,10 +2149,46 @@
         showToast(`Order ${order.orderCode} confirmed!`);
       }
 
-      // --- LIVE ORDER TRACKING ---
-      function openTrackModal(orderObj = null, isPollRefresh = false) {
-      if (!isPollRefresh && orderObj = null && orderObj = null.orderCode) startTrackAutoPoll(orderObj = null.orderCode);
-        if (orderObj) state.activeOrder = orderObj;
+      // --- LIVE ORDER TRACKING (SSE REAL-TIME STREAM) ---
+      let TH_TRACK_EVENT_SOURCE = null;
+
+      function connectTrackLiveStream(orderCode) {
+        disconnectTrackLiveStream();
+        if (!orderCode) return;
+        try {
+          const code = String(orderCode).trim().toUpperCase();
+          TH_TRACK_EVENT_SOURCE = new EventSource('/api/orders/' + encodeURIComponent(code) + '/stream');
+
+          TH_TRACK_EVENT_SOURCE.onmessage = (e) => {
+            try {
+              const updated = JSON.parse(e.data);
+              if (!updated || !updated.orderCode) return;
+              state.activeOrder = updated;
+              renderTrackBox(updated);
+              if (updated.status === 'DELIVERED') {
+                disconnectTrackLiveStream();
+              }
+            } catch (_) {}
+          };
+
+          TH_TRACK_EVENT_SOURCE.onerror = () => {
+            disconnectTrackLiveStream();
+          };
+        } catch (_) {}
+      }
+
+      function disconnectTrackLiveStream() {
+        if (TH_TRACK_EVENT_SOURCE) {
+          TH_TRACK_EVENT_SOURCE.close();
+          TH_TRACK_EVENT_SOURCE = null;
+        }
+      }
+
+      function openTrackModal(orderObj = null) {
+        if (orderObj) {
+          state.activeOrder = orderObj;
+          connectTrackLiveStream(orderObj.orderCode);
+        }
         document.getElementById("trackModal").classList.remove("hidden");
         if (state.activeOrder) {
           document.getElementById("trackCodeInput").value =
@@ -2173,6 +2212,7 @@
           if (!res.ok) return showToast(data.error || "Order not found");
           state.activeOrder = data;
           renderTrackBox(data);
+          connectTrackLiveStream(code);
         } catch (_) {
           showToast("Unable to fetch order status right now");
         }
@@ -2200,7 +2240,13 @@
               <span class="text-xs font-mono font-extrabold text-orange-600">${escapeHTML(order.orderCode)}</span>
               <h4 class="font-extrabold text-sm text-slate-900">${escapeHTML(order.restaurantName)}</h4>
             </div>
-            <span class="text-xs font-extrabold px-2.5 py-1 rounded-full bg-emerald-100 text-emerald-800">${escapeHTML(order.paymentStatus)} • ₹${escapeHTML(order.grandTotal)}</span>
+            <div class="text-right">
+              <span class="text-xs font-extrabold px-2.5 py-1 rounded-full bg-emerald-100 text-emerald-800">${escapeHTML(order.paymentStatus)} • ₹${escapeHTML(order.grandTotal)}</span>
+              <div class="flex items-center justify-end gap-1.5 mt-1 text-[11px] font-bold text-emerald-600">
+                <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                <span>Live Stream</span>
+              </div>
+            </div>
           </div>
 
           <div class="space-y-2 pt-2">
@@ -2211,7 +2257,10 @@
                 <div class="w-6 h-6 rounded-full flex items-center justify-center text-xs font-extrabold ${idx <= currentIdx ? "bg-emerald-600 text-white" : "bg-slate-200 text-slate-500"}">
                   ${idx <= currentIdx ? "✓" : idx + 1}
                 </div>
-                <span class="text-xs font-bold ${idx <= currentIdx ? "text-slate-900" : "text-slate-400"}">${labels[idx]}</span>
+                <div class="flex-1 flex items-center justify-between">
+                  <span class="text-xs font-bold ${idx <= currentIdx ? "text-slate-900" : "text-slate-400"}">${labels[idx]}</span>
+                  ${idx === 2 && order.assignedPartnerName ? `<span class="text-[10px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-md border border-emerald-100"><i class="fa-solid fa-person-biking mr-1"></i>${escapeHTML(order.assignedPartnerName)}</span>` : ''}
+                </div>
               </div>
             `,
               )
@@ -2220,7 +2269,7 @@
 
           <div class="pt-3 border-t border-slate-200 flex items-center justify-between text-xs text-slate-600">
             <span>Deliver to: <strong>${escapeHTML(order.customerName)}</strong> (${escapeHTML(order.customerPhone || "")})</span>
-            <button onclick="lookupOrderByCode()" class="text-orange-600 font-extrabold hover:underline">Refresh Status</button>
+            <button onclick="lookupOrderByCode()" class="text-orange-600 font-extrabold hover:underline">Refresh</button>
           </div>
         </div>
       `;

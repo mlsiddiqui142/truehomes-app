@@ -1,8 +1,26 @@
 require('dotenv').config();
 const path = require('path');
 const crypto = require('crypto');
+const { EventEmitter } = require('events');
 const express = require('express');
 const mongoose = require('mongoose');
+
+const orderEvents = new EventEmitter();
+orderEvents.setMaxListeners(100);
+
+function formatPublicOrder(order) {
+  const obj = typeof order.toObject === 'function' ? order.toObject() : { ...order };
+  if (obj.customerPhone) {
+    obj.customerPhone = String(obj.customerPhone).replace(/.(?=.{4})/g, '*');
+  }
+  return obj;
+}
+
+function broadcastOrderUpdate(order) {
+  if (!order || !order.orderCode) return;
+  const masked = formatPublicOrder(order);
+  orderEvents.emit(order.orderCode, masked);
+}
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const mongoSanitize = require('express-mongo-sanitize');
@@ -458,6 +476,7 @@ app.post('/api/payments/razorpay/verify', orderLimiter, async (req, res) => {
 
     order.paymentStatus = 'PAID';
     await order.save();
+    broadcastOrderUpdate(order);
 
     return res.json({ verified: true, order });
   } catch (err) {
@@ -480,16 +499,42 @@ app.get('/api/orders/:orderCode', async (req, res) => {
     const order = await Order.findOne({ orderCode: code }).lean();
     if (!order) return res.status(404).json({ error: 'Order not found' });
 
-    const maskedPhone = order.customerPhone
-      ? order.customerPhone.replace(/.(?=.{4})/g, '*')
-      : '';
-
-    return res.json({
-      ...order,
-      customerPhone: maskedPhone
-    });
+    return res.json(formatPublicOrder(order));
   } catch (err) {
     return res.status(500).json({ error: 'Failed to retrieve order' });
+  }
+});
+
+app.get('/api/orders/:orderCode/stream', async (req, res) => {
+  try {
+    const code = String(req.params.orderCode).toUpperCase().replace(/[^A-Z0-9-]/g, '');
+    const order = await Order.findOne({ orderCode: code }).lean();
+    if (!order) return res.status(404).json({ error: 'Order not found' });
+
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache, no-transform',
+      Connection: 'keep-alive'
+    });
+
+    res.write(`data: ${JSON.stringify(formatPublicOrder(order))}\n\n`);
+
+    const onUpdate = (updated) => {
+      res.write(`data: ${JSON.stringify(updated)}\n\n`);
+    };
+
+    orderEvents.on(code, onUpdate);
+
+    const ping = setInterval(() => {
+      res.write(': ping\n\n');
+    }, 20000);
+
+    req.on('close', () => {
+      clearInterval(ping);
+      orderEvents.off(code, onUpdate);
+    });
+  } catch (err) {
+    return res.status(500).end();
   }
 });
 
@@ -517,6 +562,7 @@ app.patch('/api/admin/orders/:id/status', requireAuth, requireAdmin, async (req,
 
     const order = await Order.findByIdAndUpdate(req.params.id, { status }, { new: true });
     if (!order) return res.status(404).json({ error: 'Order not found' });
+    broadcastOrderUpdate(order);
 
     return res.json(order);
   } catch (err) {
@@ -555,6 +601,7 @@ app.patch('/api/delivery/orders/:id/claim', requireAuth, requireDeliveryPartner,
     order.assignedPartnerId = req.user.id;
     order.assignedPartnerName = partner ? partner.name : 'Delivery Partner';
     await order.save();
+    broadcastOrderUpdate(order);
 
     return res.json(order);
   } catch (err) {
@@ -584,6 +631,7 @@ app.patch('/api/delivery/orders/:id/status', requireAuth, requireDeliveryPartner
 
     order.status = status;
     await order.save();
+    broadcastOrderUpdate(order);
 
     return res.json(order);
   } catch (err) {
