@@ -3191,6 +3191,69 @@ document.addEventListener('click', (event) => {
 
   openSignInGateModal(roleHint);
 }, true);
+
+/* TH_CLICK_AUTH_GATE */
+function isTrueHomesSignedIn() {
+  try {
+    if (window.__TH_FORCE_SIGNED_OUT) return false;
+    if (typeof state !== 'undefined' && state && (state.token || state.user)) {
+      return true;
+    }
+    const savedToken = localStorage.getItem('truehomes_token');
+    const savedUser = localStorage.getItem('truehomes_user');
+    return Boolean(savedToken || savedUser);
+  } catch (_) {
+    return false;
+  }
+}
+
+function openSignInGateModal(roleHint) {
+  if (typeof roleHint === 'string' && typeof setSignInRoleSection === 'function') {
+    setSignInRoleSection(roleHint);
+  }
+  if (typeof openAuthModal === 'function') {
+    openAuthModal(roleHint);
+  }
+  const modal = document.getElementById('authModal');
+  if (modal) {
+    modal.classList.remove('hidden', 'opacity-0', 'pointer-events-none');
+    modal.style.display = 'flex';
+    modal.style.opacity = '1';
+    modal.style.pointerEvents = 'auto';
+    if (typeof mountThreeRoleSignIn === 'function') {
+      mountThreeRoleSignIn();
+    }
+    if (typeof checkExistingAccountForDirectLogin === 'function') {
+      checkExistingAccountForDirectLogin();
+    }
+  }
+}
+
+document.addEventListener('click', (event) => {
+  if (isTrueHomesSignedIn()) return;
+
+  const target = event.target;
+  if (!target || !(target instanceof Element)) return;
+
+  if (target.closest('#authModal')) return;
+
+  const dismissControl = target.closest('[onclick*="closeModal"], [data-dismiss], [aria-label*="close" i], [aria-label*="dismiss" i]');
+  if (dismissControl) return;
+
+  const labelText = (target.innerText || target.textContent || '').toLowerCase();
+  let roleHint = 'user';
+  if (labelText.includes('admin')) roleHint = 'admin';
+  else if (labelText.includes('delivery')) roleHint = 'delivery_partner';
+
+  event.preventDefault();
+  event.stopPropagation();
+  if (typeof event.stopImmediatePropagation === 'function') {
+    event.stopImmediatePropagation();
+  }
+
+  openSignInGateModal(roleHint);
+}, true);
+/* END_TH_CLICK_AUTH_GATE */
 </script>
     if ('serviceWorker' in navigator) { window.addEventListener('load', () => {
     navigator.serviceWorker.register('/service-worker.js').catch(() => {}); });
