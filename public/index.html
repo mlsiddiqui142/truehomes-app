@@ -2921,6 +2921,67 @@ document.addEventListener('click', (e) => {
     setTimeout(customizeAddDishCard, 120);
   }
 });
+
+/* TH_KITCHEN_TEXT_INPUT */
+function replaceKitchenDropdownWithText() {
+  const adminModal = document.getElementById('adminModal');
+  if (!adminModal) return;
+
+  const headings = Array.from(adminModal.querySelectorAll('h1, h2, h3, h4, h5, div, p'));
+  const dishHeading = headings.find((el) => el.children.length === 0 && /add dish to kitchen/i.test((el.textContent || '').trim()));
+  if (!dishHeading) return;
+
+  const card = dishHeading.closest('div[class*="rounded"]') || dishHeading.parentElement;
+  if (!card) return;
+
+  let dl = document.getElementById('thKitchenNamesList');
+  if (!dl) {
+    dl = document.createElement('datalist');
+    dl.id = 'thKitchenNamesList';
+    document.body.appendChild(dl);
+  }
+  const kitchens = (typeof state !== 'undefined' && Array.isArray(state.restaurants)) ? state.restaurants : [];
+  dl.innerHTML = kitchens.map((r) => `<option value="${String(r.name || '').replace(/"/g, '&quot;')}"></option>`).join('');
+
+  const selects = Array.from(card.querySelectorAll('select'));
+  selects.forEach((sel) => {
+    if (sel.dataset.replacedWithText === '1') return;
+    sel.dataset.replacedWithText = '1';
+
+    const matchedKitchen = kitchens.find((r) => String(r._id) === String(sel.value)) || kitchens[0];
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.id = 'thKitchenTextInput';
+    input.setAttribute('list', 'thKitchenNamesList');
+    input.className = sel.className;
+    input.placeholder = 'Type or select Kitchen Name (e.g. Dakshin Spice Express)';
+    input.value = matchedKitchen ? matchedKitchen.name : '';
+
+    const syncToSelect = () => {
+      const val = (input.value || '').trim().toLowerCase();
+      const found = kitchens.find((r) => (r.name || '').trim().toLowerCase() === val)
+        || kitchens.find((r) => (r.name || '').trim().toLowerCase().includes(val));
+      if (found) {
+        sel.value = found._id;
+        sel.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+    };
+
+    input.addEventListener('input', syncToSelect);
+    input.addEventListener('change', syncToSelect);
+
+    // Keep dropdown hidden in DOM so existing form logic still reads its selected restaurantId
+    sel.style.display = 'none';
+    sel.parentElement.insertBefore(input, sel);
+  });
+}
+
+document.addEventListener('DOMContentLoaded', () => setTimeout(replaceKitchenDropdownWithText, 350));
+document.addEventListener('click', (e) => {
+  if (e.target && e.target.closest && (e.target.closest('[onclick*="adminModal"]') || /admin panel|restaurants & menu/i.test(e.target.textContent || ''))) {
+    setTimeout(replaceKitchenDropdownWithText, 120);
+  }
+});
 </script>
     if ('serviceWorker' in navigator) { window.addEventListener('load', () => {
     navigator.serviceWorker.register('/service-worker.js').catch(() => {}); });
