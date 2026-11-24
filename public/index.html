@@ -2776,6 +2776,151 @@ document.addEventListener('click', (e) => {
     }, 100);
   }
 });
+
+/* TH_CUSTOM_ADD_DISH_UI */
+const TH_CUSTOM_CATEGORIES = [
+  'Thalis',
+  'Biryani',
+  'Mains',
+  'North Indian',
+  'South Indian',
+  'Starters',
+  'Breads & Rotis',
+  'Rice & Bowls',
+  'Street Food',
+  'Combos',
+  'Desserts',
+  'Beverages'
+];
+
+const TH_QUICK_DISH_PRESETS = {
+  thali: { name: 'Ghar Ki Special Thali', price: 189, category: 'Thalis', isVeg: true, description: 'Dal, seasonal sabzi, rotis, rice, salad & pickle.' },
+  biryani: { name: 'Dum Biryani Special', price: 229, category: 'Biryani', isVeg: false, description: 'Fragrant basmati rice slow-cooked with spices & raita.' },
+  curry: { name: 'Paneer Tikka Masala', price: 215, category: 'Mains', isVeg: true, description: 'Char-grilled paneer cubes in rich spiced gravy.' },
+  snack: { name: 'Crispy Masala Dosa / Snack', price: 149, category: 'Street Food', isVeg: true, description: 'Crisp savory favorite served fresh with accompaniments.' },
+  sweet: { name: 'Shahi Dessert Treat', price: 109, category: 'Desserts', isVeg: true, description: 'Traditional sweet finished with nuts & cardamom.' }
+};
+
+function applyQuickDishPreset(key) {
+  const preset = TH_QUICK_DISH_PRESETS[key];
+  if (!preset) return;
+  const panel = document.getElementById('thCustomDishAddon');
+  if (!panel) return;
+  const form = panel.closest('form') || panel.parentElement;
+  if (!form) return;
+
+  const inputs = Array.from(form.querySelectorAll('input[type="text"], input[type="number"], input:not([type])'));
+  const nameInput = inputs.find((el) => /dish|name|paneer|item/i.test(el.placeholder || '') || /dish|name/i.test(el.name || '') || /dish|name/i.test(el.id || ''));
+  const priceInput = inputs.find((el) => el.type === 'number' || /price|₹/i.test(el.placeholder || '') || /price/i.test(el.name || ''));
+  const catInput = document.getElementById('thCustomCategoryInput') || inputs.find((el) => /cat|main|group/i.test(el.placeholder || '') || /cat/i.test(el.name || '') || el.value === 'Mains');
+  const descInput = inputs.find((el) => /desc|short/i.test(el.placeholder || '') || /desc/i.test(el.name || ''));
+  const vegBox = form.querySelector('input[type="checkbox"]');
+
+  if (nameInput) { nameInput.value = preset.name; nameInput.dispatchEvent(new Event('input', { bubbles: true })); }
+  if (priceInput) { priceInput.value = preset.price; priceInput.dispatchEvent(new Event('input', { bubbles: true })); }
+  if (catInput) { catInput.value = preset.category; catInput.dispatchEvent(new Event('input', { bubbles: true })); catInput.dispatchEvent(new Event('change', { bubbles: true })); }
+  if (descInput) { descInput.value = preset.description; descInput.dispatchEvent(new Event('input', { bubbles: true })); }
+  if (vegBox && vegBox.checked !== preset.isVeg) {
+    vegBox.checked = preset.isVeg;
+    vegBox.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+}
+
+function customizeAddDishCard() {
+  const adminModal = document.getElementById('adminModal');
+  if (!adminModal) return;
+
+  // Populate datalist with custom + standard categories
+  let datalist = document.getElementById('thDishCategoryOptions');
+  if (!datalist) {
+    datalist = document.createElement('datalist');
+    datalist.id = 'thDishCategoryOptions';
+    document.body.appendChild(datalist);
+  }
+
+  let savedCustomCats = [];
+  try {
+    savedCustomCats = JSON.parse(localStorage.getItem('th_custom_categories_v1') || '[]');
+  } catch (_) {}
+
+  const allCats = Array.from(new Set([...TH_CUSTOM_CATEGORIES, ...savedCustomCats]));
+  datalist.innerHTML = allCats.map((c) => `<option value="${String(c).replace(/"/g, '&quot;')}"></option>`).join('');
+
+  // Locate "Add Dish to Kitchen" heading & container
+  const headings = Array.from(adminModal.querySelectorAll('h1, h2, h3, h4, h5, div, p'));
+  const dishHeading = headings.find((el) => el.children.length === 0 && /add dish to kitchen/i.test((el.textContent || '').trim()));
+  if (!dishHeading) return;
+
+  const card = dishHeading.closest('div[class*="rounded"]') || dishHeading.parentElement;
+  if (!card) return;
+
+  // Upgrade any category select or input inside the Add Dish card to allow custom values
+  const selects = Array.from(card.querySelectorAll('select'));
+  selects.forEach((sel) => {
+    const optsText = Array.from(sel.options).map((o) => o.text.toLowerCase()).join(' ');
+    const isKitchenSelect = (typeof state !== 'undefined' && Array.isArray(state.restaurants) && state.restaurants.some((r) => Array.from(sel.options).some((o) => o.value === r._id)));
+    if (!isKitchenSelect && (!sel.options.length || /main|starter|dessert|biryani|category|veg/i.test(optsText))) {
+      if (sel.dataset.upgradedCat === '1') return;
+      sel.dataset.upgradedCat = '1';
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.id = 'thCustomCategoryInput';
+      input.setAttribute('list', 'thDishCategoryOptions');
+      input.className = sel.className;
+      input.placeholder = 'Category (select or type custom)';
+      input.value = sel.value || 'Mains';
+      sel.replaceWith(input);
+    }
+  });
+
+  const catInputs = Array.from(card.querySelectorAll('input[type="text"], input:not([type])')).filter((inp) => {
+    const ph = (inp.placeholder || '').toLowerCase();
+    const val = (inp.value || '').trim().toLowerCase();
+    return ph.includes('category') || ph.includes('mains') || val === 'mains' || inp.id === 'thCustomCategoryInput';
+  });
+  catInputs.forEach((inp) => {
+    inp.setAttribute('list', 'thDishCategoryOptions');
+    if (!inp.placeholder) inp.placeholder = 'Category (type any custom name)';
+    inp.addEventListener('change', () => {
+      const val = (inp.value || '').trim();
+      if (val && !allCats.includes(val)) {
+        const nextSaved = Array.from(new Set([...savedCustomCats, val]));
+        try { localStorage.setItem('th_custom_categories_v1', JSON.stringify(nextSaved)); } catch (_) {}
+        customizeAddDishCard();
+      }
+    });
+  });
+
+  // Add compact preset & custom-tag helper bar inside the Add Dish card
+  if (!document.getElementById('thCustomDishAddon')) {
+    const addon = document.createElement('div');
+    addon.id = 'thCustomDishAddon';
+    addon.className = 'mb-3 p-2.5 rounded-xl bg-slate-50 border border-slate-200 space-y-2';
+    addon.innerHTML = `
+      <div class="flex items-center justify-between gap-2">
+        <span class="text-[11px] font-bold text-slate-600">Quick Dish Presets:</span>
+        <span class="text-[10px] text-slate-400">Category supports custom typing</span>
+      </div>
+      <div class="flex flex-wrap gap-1.5">
+        <button type="button" onclick="applyQuickDishPreset('thali')" class="px-2 py-1 rounded-lg bg-white hover:bg-orange-50 border border-slate-200 text-[11px] font-bold text-slate-700">🍱 Thali</button>
+        <button type="button" onclick="applyQuickDishPreset('biryani')" class="px-2 py-1 rounded-lg bg-white hover:bg-orange-50 border border-slate-200 text-[11px] font-bold text-slate-700">🍲 Biryani</button>
+        <button type="button" onclick="applyQuickDishPreset('curry')" class="px-2 py-1 rounded-lg bg-white hover:bg-orange-50 border border-slate-200 text-[11px] font-bold text-slate-700">🍛 Curry</button>
+        <button type="button" onclick="applyQuickDishPreset('snack')" class="px-2 py-1 rounded-lg bg-white hover:bg-orange-50 border border-slate-200 text-[11px] font-bold text-slate-700">🥟 Snack</button>
+        <button type="button" onclick="applyQuickDishPreset('sweet')" class="px-2 py-1 rounded-lg bg-white hover:bg-orange-50 border border-slate-200 text-[11px] font-bold text-slate-700">🍨 Dessert</button>
+      </div>
+    `;
+    dishHeading.insertAdjacentElement('afterend', addon);
+  }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  setTimeout(customizeAddDishCard, 350);
+});
+document.addEventListener('click', (e) => {
+  if (e.target && e.target.closest && (e.target.closest('[onclick*="adminModal"]') || /admin panel|restaurants & menu/i.test(e.target.textContent || ''))) {
+    setTimeout(customizeAddDishCard, 120);
+  }
+});
 </script>
     if ('serviceWorker' in navigator) { window.addEventListener('load', () => {
     navigator.serviceWorker.register('/service-worker.js').catch(() => {}); });
