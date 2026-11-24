@@ -3136,12 +3136,11 @@ document.addEventListener('click', (e) => {
 function isTrueHomesSignedIn() {
   try {
     if (window.__TH_FORCE_SIGNED_OUT) return false;
-    if (typeof state !== 'undefined' && state && state.token && state.user) {
+    if (typeof state !== 'undefined' && state && (state.token || state.user)) {
       return true;
     }
-    const savedToken = localStorage.getItem('truehomes_token');
-    const savedUser = localStorage.getItem('truehomes_user');
-    return Boolean(savedToken && savedUser);
+    const keys = ['truehomes_token', 'truehomes_user', 'th_token', 'th_user', 'token', 'user'];
+    return keys.some((k) => Boolean(localStorage.getItem(k)));
   } catch (_) {
     return false;
   }
@@ -3157,6 +3156,10 @@ function lockCloseButtonsOnAuthModal(locked) {
 }
 
 function openSignInGateModal(roleHint) {
+  if (isTrueHomesSignedIn()) {
+    unlockSiteAfterAuth();
+    return;
+  }
   if (typeof roleHint === 'string' && typeof setSignInRoleSection === 'function') {
     setSignInRoleSection(roleHint);
   }
@@ -3166,50 +3169,49 @@ function openSignInGateModal(roleHint) {
     modal.style.display = 'flex';
     modal.style.opacity = '1';
     modal.style.pointerEvents = 'auto';
-    modal.style.backgroundColor = 'rgba(15, 23, 42, 0.88)';
-    modal.style.backdropFilter = 'blur(8px)';
-    lockCloseButtonsOnAuthModal(!isTrueHomesSignedIn());
-    if (typeof mountThreeRoleSignIn === 'function') {
-      mountThreeRoleSignIn();
-    }
-    if (typeof checkExistingAccountForDirectLogin === 'function') {
-      checkExistingAccountForDirectLogin();
-    }
+    lockCloseButtonsOnAuthModal(true);
+    if (typeof mountThreeRoleSignIn === 'function') mountThreeRoleSignIn();
+    if (typeof checkExistingAccountForDirectLogin === 'function') checkExistingAccountForDirectLogin();
   }
 }
 
-function enforceEntryAuthWall() {
-  const signedIn = isTrueHomesSignedIn();
-  lockCloseButtonsOnAuthModal(!signedIn);
-  if (!signedIn) {
-    openSignInGateModal();
+function unlockSiteAfterAuth() {
+  lockCloseButtonsOnAuthModal(false);
+  const modal = document.getElementById('authModal');
+  if (modal) {
+    modal.classList.add('hidden');
+    modal.style.display = 'none';
+    modal.style.pointerEvents = 'none';
   }
+  document.body.style.overflow = '';
+  document.body.style.pointerEvents = 'auto';
 }
 
-// 1. Open sign-in immediately when visiting the site
-if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', () => {
-    enforceEntryAuthWall();
-    setTimeout(enforceEntryAuthWall, 150);
-  });
-} else {
-  enforceEntryAuthWall();
-  setTimeout(enforceEntryAuthWall, 150);
+// Wrap closeModal if present so signing in always clears inline display/pointer-events styles
+if (typeof window.closeModal === 'function' && !window.__thWrappedCloseModal) {
+  window.__thWrappedCloseModal = true;
+  const origCloseModal = window.closeModal;
+  window.closeModal = function (id, ...rest) {
+    const res = origCloseModal.apply(this, [id, ...rest]);
+    if (id === 'authModal' && isTrueHomesSignedIn()) {
+      unlockSiteAfterAuth();
+    }
+    return res;
+  };
 }
 
-// 2. Keep auth wall active if closed or signed out while unauthenticated
-setInterval(() => {
-  if (!isTrueHomesSignedIn()) {
-    const modal = document.getElementById('authModal');
-    if (modal && (modal.classList.contains('hidden') || modal.style.display === 'none')) {
+// Open sign-in once on initial load if not signed in
+window.addEventListener('load', () => {
+  setTimeout(() => {
+    if (!isTrueHomesSignedIn()) {
       openSignInGateModal();
+    } else {
+      unlockSiteAfterAuth();
     }
-  } else {
-    lockCloseButtonsOnAuthModal(false);
-  }
-}, 400);
+  }, 150);
+});
 
-// 3. Intercept any click outside authModal while signed out
+// Intercept clicks outside authModal ONLY when signed out
 document.addEventListener('click', (event) => {
   if (isTrueHomesSignedIn()) return;
 
@@ -3233,15 +3235,6 @@ document.addEventListener('click', (event) => {
   }
 
   openSignInGateModal(roleHint);
-}, true);
-
-// 4. Block Escape key from dismissing sign-in before authentication
-document.addEventListener('keydown', (event) => {
-  if (!isTrueHomesSignedIn() && event.key === 'Escape') {
-    event.preventDefault();
-    event.stopPropagation();
-    openSignInGateModal();
-  }
 }, true);
 /* END_TH_CLICK_AUTH_GATE */
 </script>

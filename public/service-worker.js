@@ -1,4 +1,4 @@
-const CACHE_NAME = "truehomes-v1795493929010";
+const CACHE_NAME = "truehomes-v1795494129032";
 const STATIC_ASSETS = ["/", "/index.html", "/manifest.json"];
 
 self.addEventListener("install", (event) => {
