@@ -220,7 +220,9 @@ function App() {
   const [profileAddrText, setProfileAddrText] = useState("");
 
   // New States: Admin Dashboard Tabs & Forms
-  const [adminActiveTab, setAdminActiveTab] = useState("orders"); // "orders", "applications", "add-kitchen", "add-dish", "coupons"
+  const [adminActiveTab, setAdminActiveTab] = useState("orders"); // "orders", "applications", "add-kitchen", "add-dish", "coupons", "analytics"
+  const [adminAnalytics, setAdminAnalytics] = useState(null);
+  const [riderDeliveryOtp, setRiderDeliveryOtp] = useState({});
   const [newKitchenName, setNewKitchenName] = useState("");
   const [newKitchenCuisines, setNewKitchenCuisines] = useState("");
   const [newKitchenTime, setNewKitchenTime] = useState(30);
@@ -908,11 +910,31 @@ function App() {
     }
   }
 
+  async function cancelCustomerOrder(order) {
+    if (!window.confirm(`Are you sure you want to cancel order ${order.orderCode}?`)) return;
+    try {
+      const res = await api(`/api/orders/${order.orderCode}/cancel`, {
+        method: "POST",
+        body: JSON.stringify({ reason: "Customer cancelled from orders modal" })
+      });
+      setCustomerOrders((current) =>
+        current.map((item) => String(item._id) === String(order._id) ? res.order : item)
+      );
+      setNotice(`Order ${order.orderCode} has been cancelled.`);
+    } catch (err) {
+      setNotice(err.message || "Failed to cancel order");
+    }
+  }
+
   async function updateDeliveryStatus(order, status) {
     try {
+      const payload = { status };
+      if (status === "DELIVERED" && riderDeliveryOtp[order._id]) {
+        payload.otp = riderDeliveryOtp[order._id].trim();
+      }
       const updated = await api(`/api/delivery/orders/${order._id}/status`, {
         method: "PATCH",
-        body: JSON.stringify({ status }),
+        body: JSON.stringify(payload),
       });
       setPartnerOrders((current) =>
         current.map((item) => String(item._id) === String(updated._id) ? updated : item),
@@ -1538,6 +1560,16 @@ function App() {
               >
                 Manage Coupons
               </button>
+              <button
+                type="button"
+                className={`admin-nav-tab ${adminActiveTab === "analytics" ? "active" : ""}`}
+                onClick={() => {
+                  setAdminActiveTab("analytics");
+                  api("/api/admin/analytics").then(setAdminAnalytics).catch(() => {});
+                }}
+              >
+                📊 Analytics
+              </button>
             </div>
 
             {adminStreamError && (
@@ -1790,6 +1822,60 @@ function App() {
               </div>
             )}
 
+            {/* TAB: Analytics & Revenue */}
+            {adminActiveTab === "analytics" && (
+              <div className="admin-analytics-view">
+                {!adminAnalytics ? (
+                  <p className="muted" style={{ padding: 20 }}>Loading business metrics…</p>
+                ) : (
+                  <>
+                    <div className="analytics-metrics-grid">
+                      <div className="metric-box">
+                        <span className="metric-title">Total Orders</span>
+                        <span className="metric-val">{adminAnalytics.totalOrders}</span>
+                        <span className="metric-sub">{adminAnalytics.deliveredOrders} delivered</span>
+                      </div>
+                      <div className="metric-box highlight">
+                        <span className="metric-title">Gross Revenue</span>
+                        <span className="metric-val">₹{adminAnalytics.totalRevenue.toLocaleString()}</span>
+                        <span className="metric-sub">Net delivered order value</span>
+                      </div>
+                      <div className="metric-box">
+                        <span className="metric-title">Rider Tips</span>
+                        <span className="metric-val">₹{adminAnalytics.totalTips.toLocaleString()}</span>
+                        <span className="metric-sub">100% passed to riders</span>
+                      </div>
+                      <div className="metric-box">
+                        <span className="metric-title">Active Kitchens</span>
+                        <span className="metric-val">{adminAnalytics.activeKitchens}</span>
+                        <span className="metric-sub">Onboarded partners</span>
+                      </div>
+                    </div>
+
+                    <div className="admin-form-card" style={{ marginTop: 14 }}>
+                      <h3 style={{ margin: "0 0 10px", fontSize: 14, fontWeight: 800 }}>Top Selling Items</h3>
+                      {(!adminAnalytics.topItems || adminAnalytics.topItems.length === 0) ? (
+                        <p className="muted">No sales recorded yet.</p>
+                      ) : (
+                        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                          {adminAnalytics.topItems.map((item, idx) => (
+                            <div key={item._id || idx} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: "1px solid #f1f5f9", paddingBottom: 6 }}>
+                              <span style={{ fontSize: 13, fontWeight: 700, color: "#1e293b" }}>
+                                #{idx + 1} {item._id}
+                              </span>
+                              <span style={{ fontSize: 12, color: "#64748b" }}>
+                                <b>{item.count}</b> orders (₹{item.volume.toLocaleString()})
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
+
             {/* TAB: Rider Applications */}
             {adminActiveTab === "applications" && (
               <section className="partner-approval-section">
@@ -1876,7 +1962,27 @@ function App() {
                     <p><b>Restaurant:</b> {order.restaurantName}</p>
                     <p><b>Address:</b> {order.deliveryAddress}</p>
                     <p><b>Delivery partner:</b> {order.assignedPartnerName || "Waiting for a partner"}</p>
+                    {order.deliveryOtp && order.status !== "DELIVERED" && order.status !== "CANCELLED" && (
+                      <p style={{ margin: "4px 0", fontSize: 13, color: "#047857" }}>
+                        <b>Delivery OTP:</b> <span className="coupon-badge" style={{ background: "#d1fae5", color: "#065f46", borderColor: "#a7f3d0" }}>{order.deliveryOtp}</span> (Share with delivery partner upon arrival)
+                      </p>
+                    )}
+                    {order.status === "CANCELLED" && (
+                      <p style={{ margin: "4px 0", fontSize: 13, color: "#dc2626" }}>
+                        <b>Cancelled:</b> {order.cancellationReason || "Order was cancelled"} {order.paymentStatus === "REFUNDED" ? "(Refund Initiated)" : ""}
+                      </p>
+                    )}
                     <div style={{ display: "flex", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
+                      {["CONFIRMED", "PREPARING"].includes(order.status) && (
+                        <button
+                          type="button"
+                          className="partner-action secondary"
+                          style={{ color: "#dc2626", borderColor: "#fca5a5" }}
+                          onClick={() => cancelCustomerOrder(order)}
+                        >
+                          ✕ Cancel Order
+                        </button>
+                      )}
                       <button
                         type="button"
                         className="partner-action secondary"
@@ -1976,7 +2082,22 @@ function App() {
                                 {sharingOrderId === String(order._id) && (
                                   <button type="button" className="partner-action secondary" onClick={stopLocationSharing}>Stop sharing</button>
                                 )}
-                                <button type="button" className="partner-action secondary" onClick={() => updateDeliveryStatus(order, "DELIVERED")}>Mark delivered</button>
+                                <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                                  <input
+                                    placeholder="4-digit OTP"
+                                    maxLength={4}
+                                    value={riderDeliveryOtp[order._id] || ""}
+                                    onChange={(e) => setRiderDeliveryOtp({ ...riderDeliveryOtp, [order._id]: e.target.value })}
+                                    style={{ width: 85, padding: "6px 8px", borderRadius: 8, border: "1px solid #cbd5e1", fontSize: 12, textAlign: "center" }}
+                                  />
+                                  <button
+                                    type="button"
+                                    className="partner-action secondary"
+                                    onClick={() => updateDeliveryStatus(order, "DELIVERED")}
+                                  >
+                                    Verify & Deliver
+                                  </button>
+                                </div>
                               </div>
                               <LiveDeliveryMap order={order} />
                             </>
@@ -2049,6 +2170,16 @@ function App() {
                   <p style={{ margin: "4px 0" }}><b>Rider:</b> {trackedOrder.assignedPartnerName || "Assigning rider…"}</p>
                   <p style={{ margin: "4px 0" }}><b>Items:</b> {(trackedOrder.items || []).map((i) => `${i.name} ×${i.qty}`).join(", ")}</p>
                   <p style={{ margin: "4px 0" }}><b>Amount:</b> ₹{trackedOrder.grandTotal} ({trackedOrder.paymentStatus})</p>
+                  {trackedOrder.deliveryOtp && trackedOrder.status !== "DELIVERED" && trackedOrder.status !== "CANCELLED" && (
+                    <p style={{ margin: "4px 0", color: "#047857" }}>
+                      <b>Delivery Verification OTP:</b> <span className="coupon-badge" style={{ background: "#d1fae5", color: "#065f46", borderColor: "#a7f3d0" }}>{trackedOrder.deliveryOtp}</span>
+                    </p>
+                  )}
+                  {trackedOrder.status === "CANCELLED" && (
+                    <p style={{ margin: "4px 0", color: "#dc2626" }}>
+                      <b>Status:</b> Cancelled ({trackedOrder.cancellationReason || "No reason specified"})
+                    </p>
+                  )}
                 </div>
 
                 {trackedOrder.deliveryLocation && (

@@ -26,10 +26,11 @@ function broadcastOrderUpdate(order) {
 }
 
 const ORDER_TRANSITIONS = {
-  CONFIRMED: ['PREPARING'],
-  PREPARING: ['OUT_FOR_DELIVERY'],
+  CONFIRMED: ['PREPARING', 'CANCELLED'],
+  PREPARING: ['OUT_FOR_DELIVERY', 'CANCELLED'],
   OUT_FOR_DELIVERY: ['DELIVERED'],
-  DELIVERED: []
+  DELIVERED: [],
+  CANCELLED: []
 };
 
 function canTransitionOrderStatus(currentStatus, nextStatus) {
@@ -798,6 +799,7 @@ app.post('/api/orders', orderLimiter, optionalAuth, async (req, res) => {
 
     const orderCode = 'TH-' + crypto.randomBytes(3).toString('hex').toUpperCase();
     const isCod = paymentMethod === 'COD';
+    const deliveryOtp = String(Math.floor(1000 + Math.random() * 9000));
 
     const newOrder = await Order.create({
       orderCode,
@@ -815,7 +817,8 @@ app.post('/api/orders', orderLimiter, optionalAuth, async (req, res) => {
       tip: safeTip,
       grandTotal,
       paymentMethod: isCod ? 'COD' : 'RAZORPAY',
-      paymentStatus: isCod ? 'COD' : 'PENDING'
+      paymentStatus: isCod ? 'COD' : 'PENDING',
+      deliveryOtp
     });
 
     broadcastOrderUpdate(newOrder);
@@ -1027,6 +1030,46 @@ app.get('/api/orders/:orderCode/stream', requireAuth, async (req, res) => {
     });
   } catch (err) {
     return res.status(500).end();
+  }
+});
+
+// POST /api/orders/:orderCode/cancel — Customer or Admin cancels an order (if CONFIRMED or PREPARING)
+app.post('/api/orders/:orderCode/cancel', requireAuth, async (req, res) => {
+  try {
+    const code = String(req.params.orderCode).toUpperCase().replace(/[^A-Z0-9-]/g, '');
+    const order = await Order.findOne({ orderCode: code });
+    if (!order) return res.status(404).json({ error: 'Order not found' });
+
+    if (!canAccessOwnedOrder(req, order)) {
+      return res.status(403).json({ error: 'You do not have permission to cancel this order' });
+    }
+
+    if (!['CONFIRMED', 'PREPARING'].includes(order.status)) {
+      return res.status(409).json({
+        error: `Order cannot be cancelled in status ${order.status}. Only CONFIRMED or PREPARING orders can be cancelled.`
+      });
+    }
+
+    const reason = typeof req.body.reason === 'string' && req.body.reason.trim()
+      ? req.body.reason.trim().slice(0, 150)
+      : 'Customer requested cancellation';
+
+    order.status = 'CANCELLED';
+    order.cancellationReason = reason;
+    order.cancelledAt = new Date();
+    order.deliveryLocation = undefined;
+    if (order.paymentStatus === 'PAID') {
+      order.paymentStatus = 'REFUNDED';
+    }
+    await order.save();
+
+    broadcastOrderUpdate(order);
+    return res.json({
+      message: 'Order cancelled successfully',
+      order
+    });
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to cancel order' });
   }
 });
 
@@ -1322,6 +1365,13 @@ app.patch('/api/delivery/orders/:id/status', requireAuth, requireDeliveryPartner
 
     if (!allowedStatuses.includes(status)) {
       return res.status(400).json({ error: 'Invalid delivery status update. Allowed: OUT_FOR_DELIVERY, DELIVERED' });
+    }
+
+    if (status === 'DELIVERED' && order.deliveryOtp) {
+      const providedOtp = String(req.body.otp || '').trim();
+      if (providedOtp && providedOtp !== order.deliveryOtp) {
+        return res.status(400).json({ error: 'Invalid delivery verification OTP' });
+      }
     }
 
     if (!canTransitionOrderStatus(order.status, status)) {
@@ -1632,6 +1682,44 @@ app.get('/api/restaurants/:id/reviews', async (req, res) => {
     return res.json(reviews);
   } catch (err) {
     return res.status(500).json({ error: 'Failed to fetch reviews' });
+  }
+});
+
+// GET /api/admin/analytics — Admin & Kitchen performance insights
+app.get('/api/admin/analytics', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const totalOrders = await Order.countDocuments();
+    const deliveredOrders = await Order.countDocuments({ status: 'DELIVERED' });
+    const cancelledOrders = await Order.countDocuments({ status: 'CANCELLED' });
+
+    const revenueResult = await Order.aggregate([
+      { $match: { status: 'DELIVERED' } },
+      { $group: { _id: null, totalRevenue: { $sum: '$grandTotal' }, totalTips: { $sum: '$tip' } } }
+    ]);
+    const totalRevenue = revenueResult[0]?.totalRevenue || 0;
+    const totalTips = revenueResult[0]?.totalTips || 0;
+
+    const topItems = await Order.aggregate([
+      { $match: { status: { $ne: 'CANCELLED' } } },
+      { $unwind: '$items' },
+      { $group: { _id: '$items.name', count: { $sum: '$items.qty' }, volume: { $sum: { $multiply: ['$items.qty', '$items.unitPrice'] } } } },
+      { $sort: { count: -1 } },
+      { $limit: 5 }
+    ]);
+
+    const activeKitchens = await Restaurant.countDocuments();
+
+    return res.json({
+      totalOrders,
+      deliveredOrders,
+      cancelledOrders,
+      totalRevenue,
+      totalTips,
+      activeKitchens,
+      topItems
+    });
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to compute analytics' });
   }
 });
 

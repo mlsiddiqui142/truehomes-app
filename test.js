@@ -840,7 +840,7 @@ describe('TrueHomes Full-Stack & Cyber-Security Automated Suite', () => {
     for (let i = 0; i < 12; i++) {
       const res = await fetch(`${BASE_URL}/api/auth/login`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': '203.0.113.99' },
         body: JSON.stringify({ email: customerEmail, password: 'WrongPassword123' })
       });
       if (res.status === 429) {
@@ -995,5 +995,120 @@ describe('TrueHomes Full-Stack & Cyber-Security Automated Suite', () => {
     assert.equal(availRes.status, 200);
     const availData = await availRes.json();
     assert.equal(availData.isAvailable, false);
+  });
+
+  it('23. Order Cancellation, Delivery Partner OTP Verification, and Admin Analytics', async () => {
+    // 1. Customer places an order to test cancellation (using unique X-Forwarded-For to bypass IP limiter)
+    const orderRes = await fetch(`${BASE_URL}/api/orders`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${customerToken}`,
+        'X-Forwarded-For': '198.51.100.21'
+      },
+      body: JSON.stringify({
+        restaurantId: createdRestaurantId,
+        items: [{ menuItemId: createdMenuItemId, qty: 1 }],
+        paymentMethod: 'COD',
+        customerName: 'Rohit Sharma',
+        customerPhone: '9988776655',
+        deliveryAddress: 'Test Cancellation St'
+      })
+    });
+    assert.equal(orderRes.status, 201);
+    const orderToCancel = await orderRes.json();
+    assert.ok(orderToCancel.deliveryOtp, 'Delivery OTP should be auto-generated');
+
+    // 2. Customer cancels the order
+    const cancelRes = await fetch(`${BASE_URL}/api/orders/${orderToCancel.orderCode}/cancel`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${customerToken}`
+      },
+      body: JSON.stringify({ reason: 'Changed mind about items' })
+    });
+    assert.equal(cancelRes.status, 200);
+    const cancelData = await cancelRes.json();
+    assert.equal(cancelData.order.status, 'CANCELLED');
+    assert.equal(cancelData.order.cancellationReason, 'Changed mind about items');
+
+    // 3. Reject cancellation on already cancelled order -> 409
+    const doubleCancel = await fetch(`${BASE_URL}/api/orders/${orderToCancel.orderCode}/cancel`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${customerToken}`
+      }
+    });
+    assert.equal(doubleCancel.status, 409);
+
+    // 4. Place another order to test delivery OTP verification
+    const orderForOtpRes = await fetch(`${BASE_URL}/api/orders`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${customerToken}`,
+        'X-Forwarded-For': '198.51.100.22'
+      },
+      body: JSON.stringify({
+        restaurantId: createdRestaurantId,
+        items: [{ menuItemId: createdMenuItemId, qty: 2 }],
+        paymentMethod: 'COD',
+        customerName: 'Rohit Sharma',
+        customerPhone: '9988776655',
+        deliveryAddress: 'Test OTP Delivery St'
+      })
+    });
+    assert.equal(orderForOtpRes.status, 201);
+    const otpOrder = await orderForOtpRes.json();
+
+    // Admin transitions to PREPARING
+    await fetch(`${BASE_URL}/api/admin/orders/${otpOrder._id}/status`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken}` },
+      body: JSON.stringify({ status: 'PREPARING' })
+    });
+
+    // Partner claims order
+    await fetch(`${BASE_URL}/api/delivery/orders/${otpOrder._id}/claim`, {
+      method: 'PATCH',
+      headers: { Authorization: `Bearer ${partnerToken}` }
+    });
+
+    // Partner transitions to OUT_FOR_DELIVERY
+    await fetch(`${BASE_URL}/api/delivery/orders/${otpOrder._id}/status`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${partnerToken}` },
+      body: JSON.stringify({ status: 'OUT_FOR_DELIVERY' })
+    });
+
+    // Partner attempts delivery with incorrect OTP -> 400
+    const badOtpRes = await fetch(`${BASE_URL}/api/delivery/orders/${otpOrder._id}/status`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${partnerToken}` },
+      body: JSON.stringify({ status: 'DELIVERED', otp: '0000' })
+    });
+    assert.equal(badOtpRes.status, 400);
+
+    // Partner delivers with correct OTP -> 200
+    const goodOtpRes = await fetch(`${BASE_URL}/api/delivery/orders/${otpOrder._id}/status`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${partnerToken}` },
+      body: JSON.stringify({ status: 'DELIVERED', otp: otpOrder.deliveryOtp })
+    });
+    assert.equal(goodOtpRes.status, 200);
+    const deliveredOrder = await goodOtpRes.json();
+    assert.equal(deliveredOrder.status, 'DELIVERED');
+
+    // 5. Admin accesses business analytics & revenue
+    const analyticsRes = await fetch(`${BASE_URL}/api/admin/analytics`, {
+      headers: { Authorization: `Bearer ${adminToken}` }
+    });
+    assert.equal(analyticsRes.status, 200);
+    const analytics = await analyticsRes.json();
+    assert.ok(analytics.totalOrders >= 2);
+    assert.ok(analytics.deliveredOrders >= 1);
+    assert.ok(analytics.totalRevenue > 0);
   });
 });
