@@ -2177,7 +2177,22 @@
       }
     }
 
-    function reorderPastOrder(orderId) {
+    const SAVED_ADDR_KEY = 'truehomes_delivery_address_v1';
+function loadSavedAddress() {
+  try {
+    const s = localStorage.getItem(SAVED_ADDR_KEY);
+    const el = document.getElementById('checkoutAddress') || document.querySelector('input[name="address"]');
+    if (s && el && !el.value.trim()) el.value = s;
+  } catch (_) {}
+}
+function saveDeliveryAddress(a) {
+  try {
+    const c = String(a || '').trim();
+    if (c.length >= 5) localStorage.setItem(SAVED_ADDR_KEY, c);
+  } catch (_) {}
+}
+document.addEventListener('DOMContentLoaded', loadSavedAddress);
+function reorderPastOrder(orderId) {
       const past = (state._historyOrders || []).find((o) => o._id === orderId);
       if (!past || !past.items?.length) return;
 
