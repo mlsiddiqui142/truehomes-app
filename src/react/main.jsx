@@ -105,6 +105,14 @@ function App() {
   const [adminStreamStatus, setAdminStreamStatus] = useState("offline");
   const [adminStreamError, setAdminStreamError] = useState("");
   const [notice, setNotice] = useState("");
+  const [reviewModalOrder, setReviewModalOrder] = useState(null);
+  const [foodRating, setFoodRating] = useState(5);
+  const [deliveryRating, setDeliveryRating] = useState(5);
+  const [reviewComment, setReviewComment] = useState("");
+  const [reviewedOrders, setReviewedOrders] = useState(new Set());
+  const [viewingRestaurantReviews, setViewingRestaurantReviews] = useState(null);
+  const [restaurantReviewsList, setRestaurantReviewsList] = useState([]);
+  const [reviewsLoading, setReviewsLoading] = useState(false);
   const locationWatchId = useRef(null);
   const lastLocationSentAt = useRef(0);
 
@@ -560,6 +568,44 @@ function App() {
     }
   }
 
+  async function openRestaurantReviews(restaurant) {
+    setViewingRestaurantReviews(restaurant);
+    setReviewsLoading(true);
+    try {
+      const reviews = await api(`/api/restaurants/${restaurant._id}/reviews`);
+      setRestaurantReviewsList(Array.isArray(reviews) ? reviews : []);
+    } catch (_) {
+      setRestaurantReviewsList([]);
+    } finally {
+      setReviewsLoading(false);
+    }
+  }
+
+  async function submitOrderReview(event) {
+    event.preventDefault();
+    if (!reviewModalOrder) return;
+    try {
+      await api(`/api/orders/${reviewModalOrder.orderCode}/review`, {
+        method: "POST",
+        body: JSON.stringify({
+          foodRating: Number(foodRating),
+          deliveryRating: Number(deliveryRating),
+          comment: reviewComment.trim(),
+        }),
+      });
+      setReviewedOrders((prev) => new Set([...prev, reviewModalOrder.orderCode]));
+      setNotice("Review submitted successfully! Thank you.");
+      setReviewModalOrder(null);
+      setReviewComment("");
+      // Refresh restaurants to update the star rating and reviewCount
+      api(`/api/restaurants?search=${encodeURIComponent(search)}`)
+        .then(setRestaurants)
+        .catch(() => {});
+    } catch (error) {
+      setNotice(error.message || "Failed to submit review");
+    }
+  }
+
   return (
     <div className="app">
       <header className="topbar">
@@ -627,7 +673,15 @@ function App() {
               <div className="card-body">
                 <div className="card-title">
                   <h2>{restaurant.name}</h2>
-                  <span>{restaurant.rating} ★</span>
+                  <button
+                    type="button"
+                    className="rating-badge"
+                    title="View reviews"
+                    onClick={() => openRestaurantReviews(restaurant)}
+                  >
+                    <span>{restaurant.rating} ★</span>
+                    {restaurant.reviewCount ? <small>({restaurant.reviewCount})</small> : null}
+                  </button>
                 </div>
                 <p>{restaurant.cuisines?.join(" • ")}</p>
                 <div className="menu">
@@ -818,6 +872,24 @@ function App() {
                     <p><b>Restaurant:</b> {order.restaurantName}</p>
                     <p><b>Address:</b> {order.deliveryAddress}</p>
                     <p><b>Delivery partner:</b> {order.assignedPartnerName || "Waiting for a partner"}</p>
+                    {order.status === "DELIVERED" && !reviewedOrders.has(order.orderCode) && (
+                      <button
+                        type="button"
+                        className="partner-action"
+                        style={{ marginTop: 8 }}
+                        onClick={() => {
+                          setReviewModalOrder(order);
+                          setFoodRating(5);
+                          setDeliveryRating(5);
+                          setReviewComment("");
+                        }}
+                      >
+                        Rate & Review Order
+                      </button>
+                    )}
+                    {order.status === "DELIVERED" && reviewedOrders.has(order.orderCode) && (
+                      <p className="muted" style={{ marginTop: 4 }}>✓ You reviewed this order</p>
+                    )}
                     {order.assignedPartnerId && <LiveDeliveryMap order={order} />}
                   </article>
                 ))}
@@ -888,6 +960,102 @@ function App() {
                     </article>
                   );
                 })}
+              </div>
+            )}
+          </section>
+        </div>
+      )}
+
+      {/* Review Submission Modal */}
+      {reviewModalOrder && (
+        <div className="modal-backdrop" onMouseDown={() => setReviewModalOrder(null)}>
+          <form
+            className="modal review-modal"
+            onSubmit={submitOrderReview}
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <button type="button" className="close" onClick={() => setReviewModalOrder(null)}>×</button>
+            <h2>Rate your order</h2>
+            <p className="muted">{reviewModalOrder.restaurantName} · Order {reviewModalOrder.orderCode}</p>
+
+            <label>Food Rating (1–5 ★)</label>
+            <div className="star-rating-row">
+              {[1, 2, 3, 4, 5].map((star) => (
+                <button
+                  type="button"
+                  key={star}
+                  className={`star-btn ${foodRating >= star ? "active" : ""}`}
+                  onClick={() => setFoodRating(star)}
+                >
+                  ★
+                </button>
+              ))}
+            </div>
+
+            <label>Delivery Experience (1–5 ★)</label>
+            <div className="star-rating-row">
+              {[1, 2, 3, 4, 5].map((star) => (
+                <button
+                  type="button"
+                  key={star}
+                  className={`star-btn ${deliveryRating >= star ? "active" : ""}`}
+                  onClick={() => setDeliveryRating(star)}
+                >
+                  ★
+                </button>
+              ))}
+            </div>
+
+            <label>Comments (optional)</label>
+            <textarea
+              maxLength="300"
+              placeholder="What did you love? Any feedback on food quality or delivery?"
+              value={reviewComment}
+              onChange={(e) => setReviewComment(e.target.value)}
+            />
+            <span className="review-char-count">{reviewComment.length}/300</span>
+
+            <button className="checkout" type="submit" style={{ marginTop: 12 }}>
+              Submit Review
+            </button>
+          </form>
+        </div>
+      )}
+
+      {/* Restaurant Reviews Viewer Modal */}
+      {viewingRestaurantReviews && (
+        <div className="modal-backdrop" onMouseDown={() => setViewingRestaurantReviews(null)}>
+          <section
+            className="modal reviews-list-modal"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <button type="button" className="close" onClick={() => setViewingRestaurantReviews(null)}>×</button>
+            <h2>{viewingRestaurantReviews.name} Reviews</h2>
+            <p className="muted">
+              {viewingRestaurantReviews.rating} ★ · {viewingRestaurantReviews.reviewCount || 0} customer reviews
+            </p>
+
+            {reviewsLoading ? (
+              <p className="muted" style={{ padding: "20px 0" }}>Loading customer reviews…</p>
+            ) : restaurantReviewsList.length === 0 ? (
+              <p className="muted" style={{ padding: "20px 0" }}>No customer reviews yet. Be the first to order and review!</p>
+            ) : (
+              <div className="reviews-container">
+                {restaurantReviewsList.map((rev, idx) => (
+                  <div className="review-item" key={rev._id || idx}>
+                    <div className="review-item-header">
+                      <span>{rev.reviewerName || "Verified Customer"}</span>
+                      <span className="review-stars">
+                        {"★".repeat(rev.foodRating || 5)}{"☆".repeat(Math.max(0, 5 - (rev.foodRating || 5)))}
+                      </span>
+                    </div>
+                    {rev.comment && <p className="review-text">"{rev.comment}"</p>}
+                    <span className="review-date">
+                      {rev.createdAt ? new Date(rev.createdAt).toLocaleDateString() : ""}
+                      {rev.deliveryRating ? ` · Delivery: ${rev.deliveryRating}★` : ""}
+                    </span>
+                  </div>
+                ))}
               </div>
             )}
           </section>
