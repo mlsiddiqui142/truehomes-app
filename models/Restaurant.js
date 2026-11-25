@@ -7,7 +7,8 @@ const menuItemSchema = new mongoose.Schema({
   isVeg: { type: Boolean, default: true },
   isBestseller: { type: Boolean, default: false },
   description: String,
-  image: String
+  image: String,
+  isAvailable: { type: Boolean, default: true }
 });
 
 const restaurantSchema = new mongoose.Schema({
@@ -22,6 +23,8 @@ const restaurantSchema = new mongoose.Schema({
   location: String,
   image: String,
   fssai: String,
+  ownerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+  isOpen: { type: Boolean, default: true },
   menu: [menuItemSchema]
 });
 

@@ -1,0 +1,81 @@
+name: TrueHomes CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+
+    services:
+      mongodb:
+        image: mongo:7
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --eval 'db.runCommand({ping:1})'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      MONGO_URI: mongodb://localhost:27017/truehomes_ci
+      JWT_SECRET: ci-secret-key-at-least-32-chars-long!
+      NODE_ENV: test
+      PORT: 5055
+      UI_TEST_PORT: 5066
+      ADMIN_EMAIL: ci_admin@truehomes.test
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: truehomes-app/package-lock.json
+
+      - name: Install dependencies
+        working-directory: truehomes-app
+        run: npm ci
+
+      - name: Build frontend (Vite)
+        working-directory: truehomes-app
+        run: npm run build
+
+      - name: Run UI interface tests
+        working-directory: truehomes-app
+        run: npm run test:ui
+
+      - name: Run backend integration tests
+        working-directory: truehomes-app
+        run: npm test
+        timeout-minutes: 5
+
+  lint:
+    name: Lint & Type Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: truehomes-app/package-lock.json
+      - name: Install
+        working-directory: truehomes-app
+        run: npm ci
+      - name: Check for console.log statements
+        working-directory: truehomes-app
+        run: |
+          if grep -rn "console.log" src/react --include="*.jsx" --include="*.js" 2>/dev/null; then
+            echo "❌ console.log statements found in source! Remove them before merging."
+            exit 1
+          fi
+          echo "✅ No console.log statements found."

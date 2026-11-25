@@ -1135,3 +1135,211 @@ main { max-width: 1180px; margin: 0 auto; padding: 24px; }
   color: #94a3b8;
   margin-top: 4px;
 }
+
+/* ─── PWA Banners (Offline & Push) ────────────────────────────────── */
+.offline-banner {
+  background: #fef2f2;
+  border-bottom: 2px solid #ef4444;
+  color: #b91c1c;
+  padding: 8px 16px;
+  font-size: 13px;
+  font-weight: 700;
+  text-align: center;
+  position: sticky;
+  top: 0;
+  z-index: 1000;
+}
+.push-prompt-banner {
+  background: #fff7ed;
+  border-bottom: 2px solid #f97316;
+  color: #9a3412;
+  padding: 8px 16px;
+  font-size: 13px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  position: sticky;
+  top: 0;
+  z-index: 999;
+}
+.push-btn-yes {
+  background: #ea580c;
+  color: white;
+  border: none;
+  border-radius: 6px;
+  padding: 4px 12px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.push-btn-no {
+  background: transparent;
+  color: #78716c;
+  border: 1px solid #d6d3d1;
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+/* ─── Live In-App Chat Modal ─────────────────────────────────────── */
+.chat-modal {
+  background: white;
+  border-radius: 18px;
+  width: 92%;
+  max-width: 440px;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-shadow: 0 20px 25px -5px rgba(0,0,0,0.1), 0 8px 10px -6px rgba(0,0,0,0.1);
+}
+.chat-modal-header {
+  padding: 14px 18px;
+  background: #0f172a;
+  color: white;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.chat-modal-header h3 {
+  margin: 0;
+  font-size: 15px;
+}
+.live-dot {
+  font-size: 11px;
+  color: #22c55e;
+  font-weight: 600;
+}
+.chat-messages-container {
+  padding: 14px;
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 240px;
+  max-height: 380px;
+  background: #f8fafc;
+}
+.chat-bubble {
+  max-width: 80%;
+  padding: 10px 14px;
+  border-radius: 14px;
+  font-size: 13px;
+  line-height: 1.4;
+}
+.chat-bubble.outgoing {
+  align-self: flex-end;
+  background: #ea580c;
+  color: white;
+  border-bottom-right-radius: 2px;
+}
+.chat-bubble.incoming {
+  align-self: flex-start;
+  background: white;
+  color: #0f172a;
+  border: 1px solid #e2e8f0;
+  border-bottom-left-radius: 2px;
+}
+.chat-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 10px;
+  margin-bottom: 4px;
+  opacity: 0.85;
+}
+.chat-bubble.outgoing .chat-meta {
+  color: #fed7aa;
+}
+.chat-bubble.incoming .chat-meta {
+  color: #64748b;
+}
+.chat-input-row {
+  display: flex;
+  gap: 8px;
+  padding: 12px 14px;
+  background: white;
+  border-top: 1px solid #e2e8f0;
+}
+.chat-input-row input {
+  flex: 1;
+  padding: 8px 12px;
+  border: 1px solid #cbd5e1;
+  border-radius: 10px;
+  font-size: 13px;
+}
+
+/* ─── Kitchen Partner Portal Styles ───────────────────────────────── */
+.kitchen-dish-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 14px;
+  background: white;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  margin-bottom: 8px;
+}
+.dish-stock-btn {
+  padding: 6px 12px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  border: 1px solid transparent;
+}
+.dish-stock-btn.in-stock {
+  background: #dcfce7;
+  color: #166534;
+  border-color: #86efac;
+}
+.dish-stock-btn.out-of-stock {
+  background: #fee2e2;
+  color: #991b1b;
+  border-color: #fca5a5;
+}
+
+/* ─── Wallet & Referral Cards ─────────────────────────────────────── */
+.wallet-balance-banner {
+  background: linear-gradient(135deg, #065f46 0%, #047857 100%);
+  color: white;
+  border-radius: 14px;
+  padding: 16px;
+  margin-bottom: 14px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.wallet-balance-amount {
+  font-size: 26px;
+  font-weight: 800;
+}
+.wallet-tx-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 12px;
+  border-bottom: 1px solid #f1f5f9;
+  font-size: 12px;
+}
+.referral-share-box {
+  background: #eff6ff;
+  border: 1px dashed #60a5fa;
+  border-radius: 12px;
+  padding: 14px;
+  margin-top: 10px;
+}
+.referral-code-badge {
+  font-family: monospace;
+  font-size: 16px;
+  font-weight: 800;
+  color: #1d4ed8;
+  background: #dbeafe;
+  padding: 4px 10px;
+  border-radius: 6px;
+  letter-spacing: 1px;
+}

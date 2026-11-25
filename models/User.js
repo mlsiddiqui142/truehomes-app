@@ -20,9 +20,13 @@ const userSchema = new mongoose.Schema(
       }
     ],
     passwordHash: { type: String, required: true, select: false },
-    role: { type: String, enum: ['customer', 'admin', 'delivery_partner'], default: 'customer' },
+    role: { type: String, enum: ['customer', 'admin', 'delivery_partner', 'kitchen_owner'], default: 'customer' },
     isApproved: { type: Boolean, default: false },
-    isAvailable: { type: Boolean, default: true }
+    isAvailable: { type: Boolean, default: true },
+    walletBalance: { type: Number, default: 0, min: 0 },
+    referralCode: { type: String, sparse: true, default: null },
+    referredBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+    pushSubscription: { type: Object, default: null }
   },
   { timestamps: true }
 );

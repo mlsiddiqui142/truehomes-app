@@ -10,6 +10,8 @@ const User = require('./models/User');
 const Review = require('./models/Review');
 const RefreshSession = require('./models/RefreshSession');
 const Coupon = require('./models/Coupon');
+const Chat = require('./models/Chat');
+const WalletTransaction = require('./models/WalletTransaction');
 
 const TEST_PORT = '5055';
 const BASE_URL = `http://127.0.0.1:${TEST_PORT}`;
@@ -17,12 +19,15 @@ const BASE_URL = `http://127.0.0.1:${TEST_PORT}`;
 const runId = Date.now();
 const adminEmail = (process.env.ADMIN_EMAIL || `admin_${runId}@truehomes.test`).trim().toLowerCase();
 const customerEmail = `customer_${runId}@truehomes.test`;
+const kitchenOwnerEmail = `kitchen_${runId}@truehomes.test`;
+const refereeEmail = `referee_${runId}@truehomes.test`;
 const partnerEmails = Array.from({ length: 10 }, (_, index) => `partner${index + 1}_${runId}@truehomes.test`);
 const strongPassword = 'TestPassword@2026';
 
 let serverProc;
 let adminToken = '';
 let customerToken = '';
+let kitchenToken = '';
 let partnerToken = '';
 let partner2Token = '';
 const partnerTokens = [];
@@ -65,7 +70,7 @@ describe('TrueHomes Full-Stack & Cyber-Security Automated Suite', () => {
     if (serverProc && !serverProc.killed) {
       serverProc.kill('SIGTERM');
     }
-    const cleanupEmails = [customerEmail, ...partnerEmails];
+    const cleanupEmails = [customerEmail, kitchenOwnerEmail, refereeEmail, ...partnerEmails];
     if (createdAdminDuringTest) cleanupEmails.push(adminEmail);
     const cleanupUsers = await User.find({ email: { $in: cleanupEmails } }).select('_id').lean();
     const cleanupUserIds = cleanupUsers.map((user) => user._id);
@@ -87,6 +92,8 @@ describe('TrueHomes Full-Stack & Cyber-Security Automated Suite', () => {
       await Order.deleteMany({ orderCode: { $in: deliveryFixtureOrderCodes } });
     }
     await Coupon.deleteMany({ code: /^FESTIVE/ });
+    await Chat.deleteMany({});
+    await WalletTransaction.deleteMany({});
     await mongoose.disconnect();
   });
 
@@ -1110,5 +1117,264 @@ describe('TrueHomes Full-Stack & Cyber-Security Automated Suite', () => {
     assert.ok(analytics.totalOrders >= 2);
     assert.ok(analytics.deliveredOrders >= 1);
     assert.ok(analytics.totalRevenue > 0);
+  });
+
+  it('24. Kitchen Owner Portal: registers owner, admin assigns kitchen, owner toggles status & dish availability, views orders', async () => {
+    const testIp = '198.51.100.41';
+    // 1. Register kitchen owner
+    const regRes = await fetch(`${BASE_URL}/api/auth/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': testIp },
+      body: JSON.stringify({
+        name: 'Chef Ramesh',
+        email: kitchenOwnerEmail,
+        phone: '+91 9123456789',
+        password: strongPassword,
+        role: 'kitchen_owner'
+      })
+    });
+    assert.equal(regRes.status, 201);
+    const regData = await regRes.json();
+    assert.equal(regData.user.role, 'kitchen_owner');
+    kitchenToken = regData.token;
+
+    // 2. Admin assigns createdRestaurantId to this kitchen owner
+    const assignRes = await fetch(`${BASE_URL}/api/admin/kitchens/${createdRestaurantId}/assign-owner`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken}`, 'X-Forwarded-For': testIp },
+      body: JSON.stringify({ ownerId: regData.user.id })
+    });
+    assert.equal(assignRes.status, 200);
+    const assignedRest = await assignRes.json();
+    assert.equal(String(assignedRest.ownerId), regData.user.id);
+
+    // 3. Kitchen owner accesses my kitchen
+    const myKitchenRes = await fetch(`${BASE_URL}/api/kitchen/my`, {
+      headers: { Authorization: `Bearer ${kitchenToken}`, 'X-Forwarded-For': testIp }
+    });
+    assert.equal(myKitchenRes.status, 200);
+    const myKitchen = await myKitchenRes.json();
+    assert.equal(myKitchen._id, createdRestaurantId);
+
+    // 4. Kitchen owner toggles isOpen
+    const toggleRes = await fetch(`${BASE_URL}/api/kitchen/my/toggle`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${kitchenToken}`, 'X-Forwarded-For': testIp },
+      body: JSON.stringify({ isOpen: false })
+    });
+    assert.equal(toggleRes.status, 200);
+    const toggled = await toggleRes.json();
+    assert.equal(toggled.isOpen, false);
+
+    // Toggle back to true
+    await fetch(`${BASE_URL}/api/kitchen/my/toggle`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${kitchenToken}`, 'X-Forwarded-For': testIp },
+      body: JSON.stringify({ isOpen: true })
+    });
+
+    // 5. Kitchen owner toggles dish availability
+    const dishToggleRes = await fetch(`${BASE_URL}/api/kitchen/my/menu/${createdMenuItemId}/toggle`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${kitchenToken}`, 'X-Forwarded-For': testIp },
+      body: JSON.stringify({ isAvailable: false })
+    });
+    assert.equal(dishToggleRes.status, 200);
+    const toggledDish = await dishToggleRes.json();
+    assert.equal(toggledDish.isAvailable, false);
+
+    // 6. Kitchen owner views incoming orders
+    const kitchenOrdersRes = await fetch(`${BASE_URL}/api/kitchen/my/orders`, {
+      headers: { Authorization: `Bearer ${kitchenToken}`, 'X-Forwarded-For': testIp }
+    });
+    assert.equal(kitchenOrdersRes.status, 200);
+    const kitchenOrders = await kitchenOrdersRes.json();
+    assert.ok(Array.isArray(kitchenOrders));
+  });
+
+  it('25. Live In-App Chat: Customer and delivery rider exchange real-time messages on active order', async () => {
+    const testIp = '198.51.100.42';
+    // 1. Customer sends message on order
+    const custMsgRes = await fetch(`${BASE_URL}/api/orders/${createdOrderCode}/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${customerToken}`, 'X-Forwarded-For': testIp },
+      body: JSON.stringify({ text: 'Please ring the doorbell when you arrive!' })
+    });
+    assert.equal(custMsgRes.status, 201);
+    const custMsg = await custMsgRes.json();
+    assert.equal(custMsg.text, 'Please ring the doorbell when you arrive!');
+    assert.equal(custMsg.senderRole, 'customer');
+
+    // 2. Rider fetches chat history
+    const riderChatRes = await fetch(`${BASE_URL}/api/orders/${createdOrderCode}/chat`, {
+      headers: { Authorization: `Bearer ${partnerToken}`, 'X-Forwarded-For': testIp }
+    });
+    assert.equal(riderChatRes.status, 200);
+    const chatHistory = await riderChatRes.json();
+    assert.ok(chatHistory.length >= 1);
+    assert.equal(chatHistory[0].text, 'Please ring the doorbell when you arrive!');
+
+    // 3. Rider replies to customer
+    const riderReplyRes = await fetch(`${BASE_URL}/api/orders/${createdOrderCode}/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${partnerToken}`, 'X-Forwarded-For': testIp },
+      body: JSON.stringify({ text: 'Sure, will do! Arriving in 5 minutes.' })
+    });
+    assert.equal(riderReplyRes.status, 201);
+    const riderReply = await riderReplyRes.json();
+    assert.equal(riderReply.senderRole, 'delivery_partner');
+
+    // 4. Unauthorized user without order access gets 403
+    const strangerRes = await fetch(`${BASE_URL}/api/orders/${createdOrderCode}/chat`, {
+      headers: { Authorization: `Bearer ${partner2Token}`, 'X-Forwarded-For': testIp }
+    });
+    assert.equal(strangerRes.status, 403);
+  });
+
+  it('26. Customer Wallet, Loyalty Cashbacks & Referral Engine: balance deduction, 5% cashback on delivery & referral reward', async () => {
+    const testIp = '198.51.100.43';
+    // 1. Customer gets referral code
+    const refRes = await fetch(`${BASE_URL}/api/user/referral`, {
+      headers: { Authorization: `Bearer ${customerToken}`, 'X-Forwarded-For': testIp }
+    });
+    assert.equal(refRes.status, 200);
+    const refData = await refRes.json();
+    assert.ok(refData.referralCode);
+    const customerReferralCode = refData.referralCode;
+
+    // 2. New referee registers using referral code
+    const refereeRes = await fetch(`${BASE_URL}/api/auth/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': testIp },
+      body: JSON.stringify({
+        name: 'Friend User',
+        email: refereeEmail,
+        phone: '+91 9988112233',
+        password: strongPassword,
+        referralCode: customerReferralCode
+      })
+    });
+    assert.equal(refereeRes.status, 201);
+    const refereeData = await refereeRes.json();
+    const refereeToken = refereeData.token;
+
+    // Credit seed balance to customer wallet for testing checkout deduction
+    await User.findOneAndUpdate({ email: customerEmail }, { $set: { walletBalance: 50 } });
+
+    // 3. Customer places order using wallet balance (₹50 discount)
+    const walletOrderRes = await fetch(`${BASE_URL}/api/orders`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${customerToken}`,
+        'X-Forwarded-For': '198.51.100.31'
+      },
+      body: JSON.stringify({
+        restaurantId: createdRestaurantId,
+        items: [{ menuItemId: createdMenuItemId, qty: 1 }],
+        paymentMethod: 'COD',
+        customerName: 'Loyal Customer',
+        customerPhone: '9876543210',
+        deliveryAddress: 'Wallet Street 42',
+        walletAmountToUse: 50
+      })
+    });
+    assert.equal(walletOrderRes.status, 201);
+    const walletOrder = await walletOrderRes.json();
+    assert.equal(walletOrder.walletAmountUsed, 50);
+
+    // Verify wallet balance was deducted
+    const custWalletRes = await fetch(`${BASE_URL}/api/user/wallet`, {
+      headers: { Authorization: `Bearer ${customerToken}`, 'X-Forwarded-For': testIp }
+    });
+    const custWallet = await custWalletRes.json();
+    assert.equal(custWallet.balance, 0);
+    assert.ok(custWallet.transactions.length >= 1);
+
+    // 4. Referee places first order and has it delivered -> triggers referee cashback + customer referral bonus
+    const refOrderRes = await fetch(`${BASE_URL}/api/orders`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${refereeToken}`,
+        'X-Forwarded-For': '198.51.100.32'
+      },
+      body: JSON.stringify({
+        restaurantId: createdRestaurantId,
+        items: [{ menuItemId: createdMenuItemId, qty: 2 }],
+        paymentMethod: 'COD',
+        customerName: 'Referee Friend',
+        customerPhone: '9988112233',
+        deliveryAddress: 'Referee Lane 10'
+      })
+    });
+    assert.equal(refOrderRes.status, 201);
+    const refOrder = await refOrderRes.json();
+
+    // Admin transitions referee order to DELIVERED
+    await fetch(`${BASE_URL}/api/admin/orders/${refOrder._id}/status`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken}`, 'X-Forwarded-For': testIp },
+      body: JSON.stringify({ status: 'PREPARING' })
+    });
+    await fetch(`${BASE_URL}/api/admin/orders/${refOrder._id}/status`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken}`, 'X-Forwarded-For': testIp },
+      body: JSON.stringify({ status: 'OUT_FOR_DELIVERY' })
+    });
+    const deliveredRes = await fetch(`${BASE_URL}/api/admin/orders/${refOrder._id}/status`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken}`, 'X-Forwarded-For': testIp },
+      body: JSON.stringify({ status: 'DELIVERED' })
+    });
+    assert.equal(deliveredRes.status, 200);
+
+    // Verify referee got 5% cashback
+    const refereeWalletRes = await fetch(`${BASE_URL}/api/user/wallet`, {
+      headers: { Authorization: `Bearer ${refereeToken}`, 'X-Forwarded-For': testIp }
+    });
+    const refereeWallet = await refereeWalletRes.json();
+    assert.ok(refereeWallet.balance > 0);
+
+    // Verify original referrer got ₹100 referral reward credited
+    const referrerWalletRes = await fetch(`${BASE_URL}/api/user/wallet`, {
+      headers: { Authorization: `Bearer ${customerToken}`, 'X-Forwarded-For': testIp }
+    });
+    const referrerWallet = await referrerWalletRes.json();
+    assert.equal(referrerWallet.balance, 100);
+  });
+
+  it('27. PWA Web Push & Offline Mode: VAPID public key fetch and push subscription registration', async () => {
+    const testIp = '198.51.100.44';
+    // 1. Fetch VAPID public key
+    const vapidRes = await fetch(`${BASE_URL}/api/push/vapid-public-key`, {
+      headers: { 'X-Forwarded-For': testIp }
+    });
+    assert.equal(vapidRes.status, 200);
+    const vapidData = await vapidRes.json();
+    assert.ok(vapidData.publicKey);
+
+    // 2. Register push subscription for customer
+    const subRes = await fetch(`${BASE_URL}/api/user/push-subscribe`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${customerToken}`, 'X-Forwarded-For': testIp },
+      body: JSON.stringify({
+        subscription: {
+          endpoint: 'https://fcm.googleapis.com/fcm/send/test-sub-endpoint',
+          keys: {
+            p256dh: 'BNcRdreALRFXTkOOUHK1EtK2wtaz5Ry4YfYCA_0QT9t0448G3mq2QC9W8b-Bq9eMmsC0f4z2',
+            auth: 'tBHItJI5svbpez7KI4CCXg'
+          }
+        }
+      })
+    });
+    assert.equal(subRes.status, 200);
+    const subData = await subRes.json();
+    assert.equal(subData.success, true);
+
+    // Verify push subscription stored in User document
+    const updatedUser = await User.findOne({ email: customerEmail }).select('pushSubscription');
+    assert.ok(updatedUser.pushSubscription);
+    assert.equal(updatedUser.pushSubscription.endpoint, 'https://fcm.googleapis.com/fcm/send/test-sub-endpoint');
   });
 });

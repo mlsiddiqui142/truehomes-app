@@ -8,6 +8,9 @@ const mongoose = require('mongoose');
 const orderEvents = new EventEmitter();
 orderEvents.setMaxListeners(100);
 
+const chatEvents = new EventEmitter();
+chatEvents.setMaxListeners(100);
+
 function formatPublicOrder(order) {
   const obj = typeof order.toObject === 'function' ? order.toObject() : { ...order };
   delete obj.customerName;
@@ -23,6 +26,20 @@ function broadcastOrderUpdate(order) {
   const value = typeof order.toObject === 'function' ? order.toObject() : { ...order };
   orderEvents.emit(order.orderCode, value);
   orderEvents.emit('admin-orders', value);
+  sendPushNotification(value).catch(() => {});
+}
+
+async function sendPushNotification(order) {
+  try {
+    if (!order || !order.userId) return;
+    const user = await User.findById(order.userId).select('pushSubscription');
+    if (!user || !user.pushSubscription) return;
+    log('info', 'push_notification_dispatch', {
+      orderCode: order.orderCode,
+      status: order.status,
+      userId: String(order.userId)
+    });
+  } catch (_) {}
 }
 
 const ORDER_TRANSITIONS = {
@@ -63,6 +80,8 @@ const User = require('./models/User');
 const Review = require('./models/Review');
 const RefreshSession = require('./models/RefreshSession');
 const Coupon = require('./models/Coupon');
+const Chat = require('./models/Chat');
+const WalletTransaction = require('./models/WalletTransaction');
 
 if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32) {
   log('fatal', 'JWT_SECRET must be set and be at least 32 characters long');
@@ -353,6 +372,13 @@ function requireDeliveryPartner(req, res, next) {
   });
 }
 
+function requireKitchenOwner(req, res, next) {
+  if (!req.user || (req.user.role !== 'kitchen_owner' && req.user.role !== 'admin')) {
+    return res.status(403).json({ error: 'Kitchen owner privileges required' });
+  }
+  return next();
+}
+
 function escapeRegex(text) {
   return text.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&');
 }
@@ -438,7 +464,16 @@ app.post('/api/auth/register', authLimiter, async (req, res) => {
 
     const assignedRole = isAdminEmail
       ? 'admin'
-      : (req.body.role === 'delivery_partner' ? 'delivery_partner' : 'customer');
+      : (req.body.role === 'delivery_partner'
+          ? 'delivery_partner'
+          : (req.body.role === 'kitchen_owner' ? 'kitchen_owner' : 'customer'));
+
+    const referralCode = 'TH' + crypto.randomBytes(3).toString('hex').toUpperCase();
+    let referredBy = null;
+    if (req.body.referralCode) {
+      const referrer = await User.findOne({ referralCode: String(req.body.referralCode).trim().toUpperCase() });
+      if (referrer) referredBy = referrer._id;
+    }
 
     const passwordHash = await bcrypt.hash(password, 12);
     const user = await User.create({
@@ -447,7 +482,9 @@ app.post('/api/auth/register', authLimiter, async (req, res) => {
       phone,
       passwordHash,
       role: assignedRole,
-      isApproved: assignedRole !== 'delivery_partner'
+      isApproved: assignedRole !== 'delivery_partner',
+      referralCode,
+      referredBy
     });
     if (assignedRole === 'delivery_partner') {
       return res.status(202).json({
@@ -795,7 +832,22 @@ app.post('/api/orders', orderLimiter, optionalAuth, async (req, res) => {
 
     const safeTip = Math.min(Math.max(Number(tip) || 0, 0), 500);
     const tax = Math.round((itemTotal - discount) * 0.05);
-    const grandTotal = itemTotal - discount + deliveryFee + tax + safeTip;
+    const calculatedGrandTotal = itemTotal - discount + deliveryFee + tax + safeTip;
+
+    let walletAmountUsed = 0;
+    if (req.user && req.body.walletAmountToUse) {
+      const requestedWallet = Math.max(0, Math.round(Number(req.body.walletAmountToUse) || 0));
+      if (requestedWallet > 0) {
+        const userDoc = await User.findById(req.user.id);
+        if (userDoc && (userDoc.walletBalance || 0) > 0) {
+          walletAmountUsed = Math.min(requestedWallet, userDoc.walletBalance, calculatedGrandTotal);
+          userDoc.walletBalance -= walletAmountUsed;
+          await userDoc.save();
+        }
+      }
+    }
+
+    const grandTotal = Math.max(0, calculatedGrandTotal - walletAmountUsed);
 
     const orderCode = 'TH-' + crypto.randomBytes(3).toString('hex').toUpperCase();
     const isCod = paymentMethod === 'COD';
@@ -815,11 +867,23 @@ app.post('/api/orders', orderLimiter, optionalAuth, async (req, res) => {
       tax,
       discount,
       tip: safeTip,
+      walletAmountUsed,
       grandTotal,
       paymentMethod: isCod ? 'COD' : 'RAZORPAY',
       paymentStatus: isCod ? 'COD' : 'PENDING',
       deliveryOtp
     });
+
+    if (walletAmountUsed > 0 && req.user) {
+      await WalletTransaction.create({
+        userId: req.user.id,
+        type: 'SPEND',
+        amount: walletAmountUsed,
+        orderId: newOrder._id,
+        orderCode: newOrder.orderCode,
+        description: `Used ₹${walletAmountUsed} on order #${newOrder.orderCode}`
+      });
+    }
 
     broadcastOrderUpdate(newOrder);
     return res.status(201).json(newOrder);
@@ -1131,6 +1195,43 @@ app.get('/api/admin/orders/stream', requireAuth, requireAdmin, async (req, res) 
   }
 });
 
+async function handleOrderDelivered(order) {
+  try {
+    if (!order || !order.userId) return;
+    const itemTotal = Number(order.itemTotal) || 0;
+    const cashback = Math.max(1, Math.round(itemTotal * 0.05));
+
+    await User.findByIdAndUpdate(order.userId, { $inc: { walletBalance: cashback } });
+    await WalletTransaction.create({
+      userId: order.userId,
+      type: 'CASHBACK',
+      amount: cashback,
+      orderId: order._id,
+      orderCode: order.orderCode,
+      description: `5% Cashback on order #${order.orderCode}`
+    });
+
+    const customer = await User.findById(order.userId);
+    if (customer && customer.referredBy) {
+      const deliveredCount = await Order.countDocuments({ userId: customer._id, status: 'DELIVERED' });
+      if (deliveredCount === 1) {
+        const bonus = 100;
+        await User.findByIdAndUpdate(customer.referredBy, { $inc: { walletBalance: bonus } });
+        await WalletTransaction.create({
+          userId: customer.referredBy,
+          type: 'REFERRAL',
+          amount: bonus,
+          orderId: order._id,
+          orderCode: order.orderCode,
+          description: `₹100 Referral bonus for referring ${customer.name}`
+        });
+      }
+    }
+  } catch (err) {
+    log('error', 'handle_order_delivered_failed', { error: err.message, orderCode: order?.orderCode });
+  }
+}
+
 app.patch('/api/admin/orders/:id/status', requireAuth, requireAdmin, async (req, res) => {
   try {
     if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
@@ -1160,6 +1261,7 @@ app.patch('/api/admin/orders/:id/status', requireAuth, requireAdmin, async (req,
       { new: true }
     );
     if (!order) return res.status(404).json({ error: 'Order not found' });
+    if (status === 'DELIVERED') await handleOrderDelivered(order);
     broadcastOrderUpdate(order);
 
     return res.json(order);
@@ -1391,6 +1493,7 @@ app.patch('/api/delivery/orders/:id/status', requireAuth, requireDeliveryPartner
       return res.status(409).json({ error: 'Order status changed concurrently. Please retry.' });
     }
 
+    if (status === 'DELIVERED') await handleOrderDelivered(updatedOrder);
     broadcastOrderUpdate(updatedOrder);
 
     return res.json(updatedOrder);
@@ -1720,6 +1823,281 @@ app.get('/api/admin/analytics', requireAuth, requireAdmin, async (req, res) => {
     });
   } catch (err) {
     return res.status(500).json({ error: 'Failed to compute analytics' });
+  }
+});
+
+// ─── Kitchen Owner / Vendor Partner Portal Routes ──────────────────────────
+
+// GET /api/kitchen/my — Get the logged-in kitchen owner's restaurant
+app.get('/api/kitchen/my', requireAuth, requireKitchenOwner, async (req, res) => {
+  try {
+    let restaurant;
+    if (req.user.role === 'admin' && req.query.restaurantId) {
+      restaurant = await Restaurant.findById(req.query.restaurantId);
+    } else {
+      restaurant = await Restaurant.findOne({ ownerId: req.user.id });
+      if (!restaurant && req.user.role === 'admin') {
+        restaurant = await Restaurant.findOne();
+      }
+    }
+    if (!restaurant) {
+      return res.status(404).json({ error: 'No kitchen assigned to this partner yet' });
+    }
+    return res.json(restaurant);
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to fetch kitchen data' });
+  }
+});
+
+// PATCH /api/kitchen/my/toggle — Toggle kitchen open/closed status
+app.patch('/api/kitchen/my/toggle', requireAuth, requireKitchenOwner, async (req, res) => {
+  try {
+    let restaurant;
+    if (req.user.role === 'admin' && req.query.restaurantId) {
+      restaurant = await Restaurant.findById(req.query.restaurantId);
+    } else {
+      restaurant = await Restaurant.findOne({ ownerId: req.user.id });
+    }
+    if (!restaurant) return res.status(404).json({ error: 'Kitchen not found' });
+
+    restaurant.isOpen = req.body.isOpen !== undefined ? Boolean(req.body.isOpen) : !restaurant.isOpen;
+    await restaurant.save();
+    return res.json({ id: restaurant._id, name: restaurant.name, isOpen: restaurant.isOpen });
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to toggle kitchen status' });
+  }
+});
+
+// PATCH /api/kitchen/my/menu/:itemId/toggle — Toggle dish availability
+app.patch('/api/kitchen/my/menu/:itemId/toggle', requireAuth, requireKitchenOwner, async (req, res) => {
+  try {
+    let restaurant;
+    if (req.user.role === 'admin' && req.query.restaurantId) {
+      restaurant = await Restaurant.findById(req.query.restaurantId);
+    } else {
+      restaurant = await Restaurant.findOne({ ownerId: req.user.id });
+    }
+    if (!restaurant) return res.status(404).json({ error: 'Kitchen not found' });
+
+    const item = restaurant.menu.id(req.params.itemId);
+    if (!item) return res.status(404).json({ error: 'Menu item not found' });
+
+    item.isAvailable = req.body.isAvailable !== undefined ? Boolean(req.body.isAvailable) : !item.isAvailable;
+    await restaurant.save();
+    return res.json(item);
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to toggle dish availability' });
+  }
+});
+
+// GET /api/kitchen/my/orders — Kitchen owner's live & incoming orders
+app.get('/api/kitchen/my/orders', requireAuth, requireKitchenOwner, async (req, res) => {
+  try {
+    let restaurant;
+    if (req.user.role === 'admin' && req.query.restaurantId) {
+      restaurant = await Restaurant.findById(req.query.restaurantId);
+    } else {
+      restaurant = await Restaurant.findOne({ ownerId: req.user.id });
+    }
+    if (!restaurant) return res.status(404).json({ error: 'Kitchen not found' });
+
+    const orders = await Order.find({
+      restaurantId: restaurant._id,
+      status: { $ne: 'CANCELLED' }
+    }).sort({ createdAt: -1 }).limit(30);
+
+    return res.json(orders);
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to fetch kitchen orders' });
+  }
+});
+
+// POST /api/admin/kitchens/:restaurantId/assign-owner — Admin assigns owner
+app.post('/api/admin/kitchens/:restaurantId/assign-owner', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const { ownerId } = req.body;
+    if (!mongoose.Types.ObjectId.isValid(ownerId)) {
+      return res.status(400).json({ error: 'Valid ownerId required' });
+    }
+    const ownerUser = await User.findById(ownerId);
+    if (!ownerUser) return res.status(404).json({ error: 'User not found' });
+
+    const restaurant = await Restaurant.findByIdAndUpdate(
+      req.params.restaurantId,
+      { ownerId },
+      { new: true }
+    );
+    if (!restaurant) return res.status(404).json({ error: 'Restaurant not found' });
+    return res.json(restaurant);
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to assign kitchen owner' });
+  }
+});
+
+// ─── Live In-App Chat Routes ──────────────────────────────────────────────
+
+async function canAccessOrderChat(req, orderCode) {
+  const order = await Order.findOne({ orderCode });
+  if (!order) return null;
+  if (!req.user) return null;
+  if (req.user.role === 'admin') return order;
+  if (order.userId && String(order.userId) === req.user.id) return order;
+  if (order.assignedPartnerId && String(order.assignedPartnerId) === req.user.id) return order;
+  return null;
+}
+
+// GET /api/orders/:orderCode/chat — Retrieve chat message history
+app.get('/api/orders/:orderCode/chat', requireAuth, async (req, res) => {
+  try {
+    const orderCode = String(req.params.orderCode || '').toUpperCase();
+    const order = await canAccessOrderChat(req, orderCode);
+    if (!order) return res.status(403).json({ error: 'Access denied to order chat' });
+
+    let chat = await Chat.findOne({ orderCode });
+    if (!chat) {
+      chat = await Chat.create({ orderCode, messages: [] });
+    }
+    return res.json(chat.messages);
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to fetch chat history' });
+  }
+});
+
+// POST /api/orders/:orderCode/chat — Send a chat message
+app.post('/api/orders/:orderCode/chat', requireAuth, async (req, res) => {
+  try {
+    const orderCode = String(req.params.orderCode || '').toUpperCase();
+    const order = await canAccessOrderChat(req, orderCode);
+    if (!order) return res.status(403).json({ error: 'Access denied to order chat' });
+
+    const text = typeof req.body.text === 'string' ? req.body.text.trim().slice(0, 500) : '';
+    if (!text) return res.status(400).json({ error: 'Message text cannot be empty' });
+
+    const message = {
+      senderRole: req.user.role,
+      senderId: req.user.id,
+      senderName: req.user.name || req.user.role,
+      text,
+      sentAt: new Date()
+    };
+
+    let chat = await Chat.findOne({ orderCode });
+    if (!chat) {
+      chat = await Chat.create({ orderCode, messages: [message] });
+    } else {
+      chat.messages.push(message);
+      await chat.save();
+    }
+
+    const latest = chat.messages[chat.messages.length - 1];
+    chatEvents.emit(orderCode, latest);
+    return res.status(201).json(latest);
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to post chat message' });
+  }
+});
+
+// GET /api/orders/:orderCode/chat/stream — Real-time SSE stream for chat
+app.get('/api/orders/:orderCode/chat/stream', optionalAuth, async (req, res) => {
+  const orderCode = String(req.params.orderCode || '').toUpperCase();
+  if (!req.user && req.query.token) {
+    try {
+      const payload = jwt.verify(req.query.token, process.env.JWT_SECRET, { algorithms: ['HS256'] });
+      req.user = { id: payload.sub, role: payload.role, name: payload.name };
+    } catch (_) {}
+  }
+
+  const order = await canAccessOrderChat(req, orderCode);
+  if (!order) {
+    return res.status(403).json({ error: 'Access denied to order chat stream' });
+  }
+
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no'
+  });
+
+  const onMessage = (msg) => {
+    if (!res.destroyed) res.write(`data: ${JSON.stringify(msg)}\n\n`);
+  };
+
+  chatEvents.on(orderCode, onMessage);
+  const ping = setInterval(() => {
+    if (!res.destroyed) res.write(': ping\n\n');
+  }, 20000);
+
+  res.once('close', () => {
+    clearInterval(ping);
+    chatEvents.off(orderCode, onMessage);
+  });
+});
+
+// ─── Customer Wallet & Referral Engine Routes ──────────────────────────────
+
+// GET /api/user/wallet — Wallet balance & recent transactions
+app.get('/api/user/wallet', requireAuth, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id).select('walletBalance');
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    const transactions = await WalletTransaction.find({ userId: req.user.id })
+      .sort({ createdAt: -1 })
+      .limit(10);
+
+    return res.json({
+      balance: user.walletBalance || 0,
+      transactions
+    });
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to fetch wallet' });
+  }
+});
+
+// GET /api/user/referral — Own referral code & count
+app.get('/api/user/referral', requireAuth, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id).select('referralCode name');
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    let referralCode = user.referralCode;
+    if (!referralCode) {
+      referralCode = 'TH' + crypto.randomBytes(3).toString('hex').toUpperCase();
+      user.referralCode = referralCode;
+      await user.save();
+    }
+
+    const referralCount = await User.countDocuments({ referredBy: user._id });
+    return res.json({
+      referralCode,
+      referralCount,
+      rewardPerReferral: 100
+    });
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to fetch referral data' });
+  }
+});
+
+// ─── PWA Web Push Notification Routes ──────────────────────────────────────
+
+// GET /api/push/vapid-public-key — Public VAPID key for browser subscription
+app.get('/api/push/vapid-public-key', (req, res) => {
+  return res.json({ publicKey: process.env.VAPID_PUBLIC_KEY || '' });
+});
+
+// POST /api/user/push-subscribe — Store push subscription on user profile
+app.post('/api/user/push-subscribe', requireAuth, async (req, res) => {
+  try {
+    const subscription = req.body.subscription;
+    if (!subscription || typeof subscription !== 'object') {
+      return res.status(400).json({ error: 'Valid subscription object required' });
+    }
+
+    await User.findByIdAndUpdate(req.user.id, { pushSubscription: subscription });
+    return res.json({ success: true, message: 'Push subscription active' });
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to save push subscription' });
   }
 });
 

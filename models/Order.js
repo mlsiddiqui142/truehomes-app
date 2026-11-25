@@ -22,6 +22,7 @@ const orderSchema = new mongoose.Schema(
     tax: Number,
     discount: Number,
     tip: { type: Number, default: 0, min: 0, max: 500 },
+    walletAmountUsed: { type: Number, default: 0, min: 0 },
     grandTotal: Number,
     paymentMethod: { type: String, enum: ['UPI', 'CARD', 'RAZORPAY', 'COD'], default: 'RAZORPAY' },
     paymentStatus: { type: String, enum: ['PENDING', 'PAID', 'COD'], default: 'PENDING' },
