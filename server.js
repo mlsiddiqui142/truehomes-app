@@ -61,12 +61,17 @@ function canAccessOwnedOrder(req, order) {
   return req.user.role === 'admin' || req.user.id === String(order.userId);
 }
 
-function canTrackOrder(req, order) {
+async function canTrackOrder(req, order) {
   if (!req.user) return false;
   if (req.user.role === 'admin') return true;
-  if (order.userId && req.user.id === String(order.userId)) return true;
-  return req.user.role === 'delivery_partner' &&
-    String(order.assignedPartnerId || '') === req.user.id;
+  if (order.userId && String(req.user.id) === String(order.userId)) return true;
+  if (req.user.role === 'delivery_partner' && String(order.assignedPartnerId || '') === String(req.user.id)) return true;
+  if (req.user.role === 'kitchen_owner') {
+    // If user owns the restaurant of this order
+    const rest = await Restaurant.findOne({ _id: order.restaurantId, ownerId: req.user.id }).select('_id');
+    if (rest) return true;
+  }
+  return false;
 }
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
@@ -589,7 +594,13 @@ app.get('/api/auth/me', requireAuth, async (req, res) => {
       name: user.name,
       email: user.email,
       phone: user.phone,
+      avatar: user.avatar || '',
+      bio: user.bio || '',
+      dietaryPreference: user.dietaryPreference || 'all',
+      dateOfBirth: user.dateOfBirth || '',
+      gender: user.gender || 'prefer_not_to_say',
       role: user.role,
+      walletBalance: user.walletBalance || 0,
       isAvailable: user.isAvailable !== false,
       addresses: user.addresses || []
     });
@@ -598,10 +609,10 @@ app.get('/api/auth/me', requireAuth, async (req, res) => {
   }
 });
 
-// PATCH /api/user/profile — update customer profile details
+// PATCH /api/user/profile — update profile details (photo, name, phone, bio, dietary preferences, dob, gender)
 app.patch('/api/user/profile', requireAuth, async (req, res) => {
   try {
-    const { name, phone } = req.body;
+    const { name, phone, avatar, bio, dietaryPreference, dateOfBirth, gender } = req.body;
     const user = await User.findById(req.user.id);
     if (!user) return res.status(404).json({ error: 'User not found' });
 
@@ -611,6 +622,21 @@ app.patch('/api/user/profile', requireAuth, async (req, res) => {
     if (typeof phone === 'string' && phone.trim().length >= 10) {
       user.phone = phone.trim().slice(0, 15);
     }
+    if (typeof avatar === 'string') {
+      user.avatar = avatar.trim().slice(0, 500);
+    }
+    if (typeof bio === 'string') {
+      user.bio = bio.trim().slice(0, 160);
+    }
+    if (['all', 'veg_only', 'non_veg', 'vegan'].includes(dietaryPreference)) {
+      user.dietaryPreference = dietaryPreference;
+    }
+    if (typeof dateOfBirth === 'string') {
+      user.dateOfBirth = dateOfBirth.trim().slice(0, 30);
+    }
+    if (['prefer_not_to_say', 'female', 'male', 'other'].includes(gender)) {
+      user.gender = gender;
+    }
     await user.save();
 
     return res.json({
@@ -618,7 +644,13 @@ app.patch('/api/user/profile', requireAuth, async (req, res) => {
       name: user.name,
       email: user.email,
       phone: user.phone,
+      avatar: user.avatar || '',
+      bio: user.bio || '',
+      dietaryPreference: user.dietaryPreference || 'all',
+      dateOfBirth: user.dateOfBirth || '',
+      gender: user.gender || 'prefer_not_to_say',
       role: user.role,
+      walletBalance: user.walletBalance || 0,
       isAvailable: user.isAvailable !== false,
       addresses: user.addresses || []
     });
@@ -645,6 +677,32 @@ app.post('/api/user/addresses', requireAuth, async (req, res) => {
     return res.status(201).json({ addresses: user.addresses });
   } catch (err) {
     return res.status(500).json({ error: 'Failed to save address' });
+  }
+});
+
+// PUT /api/user/addresses/:addressId — update an existing saved address
+app.put('/api/user/addresses/:addressId', requireAuth, async (req, res) => {
+  try {
+    const { label = 'Home', address } = req.body;
+    if (!address || typeof address !== 'string' || address.trim().length < 5) {
+      return res.status(400).json({ error: 'Valid delivery address (5+ characters) is required' });
+    }
+
+    const user = await User.findById(req.user.id);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    const addrItem = (user.addresses || []).find((a) => String(a._id) === String(req.params.addressId));
+    if (!addrItem) {
+      return res.status(404).json({ error: 'Address not found' });
+    }
+
+    addrItem.label = String(label).trim().slice(0, 20);
+    addrItem.address = address.trim().slice(0, 200);
+    await user.save();
+
+    return res.json({ addresses: user.addresses });
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to update address' });
   }
 });
 
@@ -1057,7 +1115,7 @@ app.get('/api/orders/:orderCode', requireAuth, async (req, res) => {
     const code = String(req.params.orderCode).toUpperCase().replace(/[^A-Z0-9-]/g, '');
     const order = await Order.findOne({ orderCode: code }).lean();
     if (!order) return res.status(404).json({ error: 'Order not found' });
-    if (!canTrackOrder(req, order)) {
+    if (!(await canTrackOrder(req, order))) {
       return res.status(403).json({ error: 'You do not have access to this order' });
     }
 
@@ -1072,7 +1130,7 @@ app.get('/api/orders/:orderCode/stream', requireAuth, async (req, res) => {
     const code = String(req.params.orderCode).toUpperCase().replace(/[^A-Z0-9-]/g, '');
     const order = await Order.findOne({ orderCode: code }).lean();
     if (!order) return res.status(404).json({ error: 'Order not found' });
-    if (!canTrackOrder(req, order)) {
+    if (!(await canTrackOrder(req, order))) {
       return res.status(403).json({ error: 'You do not have access to this order' });
     }
 
@@ -1698,14 +1756,16 @@ app.post('/api/orders/:orderCode/review', requireAuth, async (req, res) => {
 
     // Create review
     const review = await Review.create({
-      orderId:        order._id,
-      orderCode:      order.orderCode,
-      userId:         req.user.id || null,
-      restaurantId:   order.restaurantId,
-      foodRating:     fr,
-      deliveryRating: deliveryRating != null ? Number(deliveryRating) : null,
-      comment:        typeof comment === 'string' ? comment.trim().slice(0, 300) : '',
-      reviewerName:   req.user.name || 'Anonymous'
+      orderId:             order._id,
+      orderCode:           order.orderCode,
+      userId:              req.user.id || null,
+      restaurantId:        order.restaurantId,
+      deliveryPartnerId:   order.assignedPartnerId || null,
+      deliveryPartnerName: order.assignedPartnerName || '',
+      foodRating:          fr,
+      deliveryRating:      deliveryRating != null ? Number(deliveryRating) : null,
+      comment:             typeof comment === 'string' ? comment.trim().slice(0, 300) : '',
+      reviewerName:        req.user.name || 'Anonymous'
     });
 
     // Recalculate restaurant average rating
@@ -1721,10 +1781,67 @@ app.post('/api/orders/:orderCode/review', requireAuth, async (req, res) => {
       });
     }
 
+    // Broadcast review event so kitchen, rider, and admin get real-time notification
+    orderEvents.emit('admin-orders', { type: 'review', orderCode: order.orderCode, review });
+
     return res.status(201).json(review);
   } catch (err) {
     if (err.code === 11000) return res.status(409).json({ error: 'You have already reviewed this order' });
     return res.status(500).json({ error: err.message || 'Failed to submit review' });
+  }
+});
+
+// GET /api/delivery/reviews — Delivery partner's received customer reviews and ratings
+app.get('/api/delivery/reviews', requireAuth, async (req, res) => {
+  try {
+    if (req.user.role !== 'delivery_partner' && req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Delivery partner access required' });
+    }
+    const filter = req.user.role === 'delivery_partner' ? { deliveryPartnerId: req.user.id } : {};
+    const reviews = await Review.find(filter)
+      .sort({ createdAt: -1 })
+      .limit(30)
+      .populate('orderId', 'orderCode customerName deliveryAddress items grandTotal');
+    return res.json(reviews);
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to fetch delivery reviews' });
+  }
+});
+
+// GET /api/kitchen/my/reviews — Kitchen owner's received food reviews and customer feedback
+app.get('/api/kitchen/my/reviews', requireAuth, requireKitchenOwner, async (req, res) => {
+  try {
+    let restaurant;
+    if (req.user.role === 'admin' && req.query.restaurantId) {
+      restaurant = await Restaurant.findById(req.query.restaurantId);
+    } else {
+      restaurant = await Restaurant.findOne({ ownerId: req.user.id });
+      if (!restaurant && req.user.role === 'admin') {
+        restaurant = await Restaurant.findOne();
+      }
+    }
+    if (!restaurant) return res.status(404).json({ error: 'Kitchen not found' });
+
+    const reviews = await Review.find({ restaurantId: restaurant._id })
+      .sort({ createdAt: -1 })
+      .limit(50);
+    return res.json(reviews);
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to fetch kitchen reviews' });
+  }
+});
+
+// GET /api/admin/reviews — Admin global view of all customer reviews
+app.get('/api/admin/reviews', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const reviews = await Review.find()
+      .sort({ createdAt: -1 })
+      .limit(100)
+      .populate('restaurantId', 'name location')
+      .populate('deliveryPartnerId', 'name phone');
+    return res.json(reviews);
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to fetch admin reviews' });
   }
 });
 

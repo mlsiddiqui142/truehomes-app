@@ -914,6 +914,24 @@ describe('TrueHomes Full-Stack & Cyber-Security Automated Suite', () => {
     assert.ok(Array.isArray(reviews), 'reviews must be an array');
     assert.ok(reviews.length >= 1, 'at least 1 review should exist');
     assert.equal(reviews[0].foodRating, 5);
+
+    // Verify delivery partner reviews endpoint
+    const riderRevRes = await fetch(`${BASE_URL}/api/delivery/reviews`, {
+      headers: { Authorization: `Bearer ${partnerToken}` }
+    });
+    assert.equal(riderRevRes.status, 200);
+    const riderRevs = await riderRevRes.json();
+    assert.ok(Array.isArray(riderRevs));
+    assert.ok(riderRevs.some((r) => r.orderCode === createdOrderCode));
+
+    // Verify admin global reviews endpoint
+    const adminRevRes = await fetch(`${BASE_URL}/api/admin/reviews`, {
+      headers: { Authorization: `Bearer ${adminToken}` }
+    });
+    assert.equal(adminRevRes.status, 200);
+    const adminRevs = await adminRevRes.json();
+    assert.ok(Array.isArray(adminRevs));
+    assert.ok(adminRevs.some((r) => r.orderCode === createdOrderCode));
   });
 
   it('21. Dynamic Coupon engine: Admin creates coupon, customer validates and checkout calculates discount', async () => {
@@ -957,19 +975,41 @@ describe('TrueHomes Full-Stack & Cyber-Security Automated Suite', () => {
   });
 
   it('22. Customer Profile & Address Management and Rider Availability Toggle', async () => {
-    // 1. Update customer profile details (name & phone)
+    // 1. Update customer profile details (name, phone, avatar, bio, dietaryPreference, dateOfBirth, gender)
     const profRes = await fetch(`${BASE_URL}/api/user/profile`, {
       method: 'PATCH',
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${customerToken}`
       },
-      body: JSON.stringify({ name: 'Rohit Sharma (VIP)', phone: '9988776655' })
+      body: JSON.stringify({
+        name: 'Rohit Sharma (VIP)',
+        phone: '9988776655',
+        avatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150',
+        bio: 'Food enthusiast & Biryani lover',
+        dietaryPreference: 'veg_only',
+        dateOfBirth: '1995-04-30',
+        gender: 'male'
+      })
     });
     assert.equal(profRes.status, 200);
     const profData = await profRes.json();
     assert.equal(profData.name, 'Rohit Sharma (VIP)');
     assert.equal(profData.phone, '9988776655');
+    assert.equal(profData.avatar, 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150');
+    assert.equal(profData.bio, 'Food enthusiast & Biryani lover');
+    assert.equal(profData.dietaryPreference, 'veg_only');
+    assert.equal(profData.dateOfBirth, '1995-04-30');
+    assert.equal(profData.gender, 'male');
+
+    // Verify GET /api/auth/me returns all profile fields
+    const meRes = await fetch(`${BASE_URL}/api/auth/me`, {
+      headers: { Authorization: `Bearer ${customerToken}` }
+    });
+    assert.equal(meRes.status, 200);
+    const meData = await meRes.json();
+    assert.equal(meData.avatar, 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150');
+    assert.equal(meData.dietaryPreference, 'veg_only');
 
     // 2. Save a new delivery address
     const addRes = await fetch(`${BASE_URL}/api/user/addresses`, {
@@ -985,6 +1025,21 @@ describe('TrueHomes Full-Stack & Cyber-Security Automated Suite', () => {
     assert.ok(Array.isArray(addData.addresses));
     const createdAddress = addData.addresses.find((a) => a.label === 'Office');
     assert.ok(createdAddress);
+
+    // 2b. Edit existing saved address (PUT)
+    const editAddrRes = await fetch(`${BASE_URL}/api/user/addresses/${createdAddress._id}`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${customerToken}`
+      },
+      body: JSON.stringify({ label: 'Headquarters', address: 'Tower C, 10th Floor, Cyber City, Gurugram' })
+    });
+    assert.equal(editAddrRes.status, 200);
+    const editAddrData = await editAddrRes.json();
+    const editedAddr = editAddrData.addresses.find((a) => a._id === createdAddress._id);
+    assert.equal(editedAddr.label, 'Headquarters');
+    assert.equal(editedAddr.address, 'Tower C, 10th Floor, Cyber City, Gurugram');
 
     // 3. Delete the saved address
     const delRes = await fetch(`${BASE_URL}/api/user/addresses/${createdAddress._id}`, {

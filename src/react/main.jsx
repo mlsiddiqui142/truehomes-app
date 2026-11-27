@@ -27,17 +27,21 @@ function playOrderChime() {
 
 function sendWebNotification(title, body) {
   playOrderChime();
-  if ("Notification" in window) {
-    if (Notification.permission === "granted") {
-      new Notification(title, { body, icon: "/favicon.ico" });
-    } else if (Notification.permission !== "denied") {
-      Notification.requestPermission().then((permission) => {
-        if (permission === "granted") {
-          new Notification(title, { body, icon: "/favicon.ico" });
-        }
-      });
+  try {
+    if ("Notification" in window && Notification.permission === "granted") {
+      // In mobile Chrome / Android PWA, new Notification() throws 'Illegal constructor'.
+      // The standard and cross-platform way is serviceWorkerRegistration.showNotification()
+      if ("serviceWorker" in navigator && navigator.serviceWorker.controller) {
+        navigator.serviceWorker.ready
+          .then((reg) => reg.showNotification(title, { body, icon: "/favicon.ico", badge: "/favicon.ico" }))
+          .catch(() => {
+            try { new Notification(title, { body, icon: "/favicon.ico" }); } catch (_) {}
+          });
+      } else {
+        try { new Notification(title, { body, icon: "/favicon.ico" }); } catch (_) {}
+      }
     }
-  }
+  } catch (_) {}
 }
 
 function calculateHaversineDistance(lat1, lon1, lat2, lon2) {
@@ -212,12 +216,21 @@ function App() {
   const [selectedCuisineFilter, setSelectedCuisineFilter] = useState("All");
   const [globalVegOnly, setGlobalVegOnly] = useState(false);
 
-  // New States: Profile & Address Manager Modal
+  // New States: Profile & Address Manager Modal (Swiggy/Zomato/Zepto-style)
   const [profileOpen, setProfileOpen] = useState(false);
+  const [profileActiveTab, setProfileActiveTab] = useState("overview"); // overview, edit, addresses, preferences
   const [profileNameInput, setProfileNameInput] = useState("");
   const [profilePhoneInput, setProfilePhoneInput] = useState("");
+  const [profileAvatarInput, setProfileAvatarInput] = useState("");
+  const [profileBioInput, setProfileBioInput] = useState("");
+  const [profileDietaryInput, setProfileDietaryInput] = useState("all");
+  const [profileDobInput, setProfileDobInput] = useState("");
+  const [profileGenderInput, setProfileGenderInput] = useState("prefer_not_to_say");
   const [profileAddrLabel, setProfileAddrLabel] = useState("Home");
   const [profileAddrText, setProfileAddrText] = useState("");
+  const [editingAddrId, setEditingAddrId] = useState(null);
+  const [editAddrLabel, setEditAddrLabel] = useState("Home");
+  const [editAddrText, setEditAddrText] = useState("");
 
   // New States: Admin Dashboard Tabs & Forms
   const [adminActiveTab, setAdminActiveTab] = useState("orders"); // "orders", "applications", "add-kitchen", "add-dish", "coupons", "analytics"
@@ -251,7 +264,10 @@ function App() {
   const [kitchenOpen, setKitchenOpen] = useState(false);
   const [myKitchen, setMyKitchen] = useState(null);
   const [kitchenOrders, setKitchenOrders] = useState([]);
-  const [kitchenTab, setKitchenTab] = useState("orders"); // "orders", "menu"
+  const [kitchenTab, setKitchenTab] = useState("orders"); // "orders", "menu", "reviews"
+  const [kitchenReviews, setKitchenReviews] = useState([]);
+  const [deliveryReviews, setDeliveryReviews] = useState([]);
+  const [adminReviews, setAdminReviews] = useState([]);
 
   // Feature 2: Live In-App Chat States
   const [chatOrderCode, setChatOrderCode] = useState(null);
@@ -317,6 +333,9 @@ function App() {
       .catch((err) => setNotice(err.message));
     api("/api/kitchen/my/orders")
       .then(setKitchenOrders)
+      .catch(() => {});
+    api("/api/kitchen/my/reviews")
+      .then(setKitchenReviews)
       .catch(() => {});
   }, [kitchenOpen, user?.role]);
 
@@ -384,6 +403,9 @@ function App() {
     api("/api/coupons/active")
       .then(setAdminCouponsList)
       .catch(() => {});
+    api("/api/admin/reviews")
+      .then(setAdminReviews)
+      .catch(() => {});
   }, [adminOpen, user?.role]);
 
   useEffect(() => {
@@ -391,6 +413,10 @@ function App() {
       setPartnerOrdersError("");
       return;
     }
+
+    api("/api/delivery/reviews")
+      .then(setDeliveryReviews)
+      .catch(() => {});
 
     let active = true;
     let refreshTimer;
@@ -744,17 +770,23 @@ function App() {
   }
 
   async function updateProfile(e) {
-    e.preventDefault();
+    if (e) e.preventDefault();
     try {
       const updated = await api("/api/user/profile", {
         method: "PATCH",
         body: JSON.stringify({
           name: profileNameInput.trim() || undefined,
-          phone: profilePhoneInput.trim() || undefined
+          phone: profilePhoneInput.trim() || undefined,
+          avatar: profileAvatarInput.trim(),
+          bio: profileBioInput.trim(),
+          dietaryPreference: profileDietaryInput,
+          dateOfBirth: profileDobInput.trim(),
+          gender: profileGenderInput
         })
       });
       setUser((prev) => ({ ...prev, ...updated }));
       setNotice("Profile updated successfully!");
+      setProfileActiveTab("overview");
     } catch (err) {
       setNotice(err.message || "Failed to update profile");
     }
@@ -776,6 +808,25 @@ function App() {
       setNotice("Address added!");
     } catch (err) {
       setNotice(err.message || "Failed to add address");
+    }
+  }
+
+  async function saveEditedAddress(e) {
+    e.preventDefault();
+    if (!editAddrText.trim() || !editingAddrId) return;
+    try {
+      const res = await api(`/api/user/addresses/${editingAddrId}`, {
+        method: "PUT",
+        body: JSON.stringify({
+          label: editAddrLabel,
+          address: editAddrText.trim()
+        })
+      });
+      setUser((prev) => ({ ...prev, addresses: res.addresses }));
+      setEditingAddrId(null);
+      setNotice("Address updated successfully!");
+    } catch (err) {
+      setNotice(err.message || "Failed to update address");
     }
   }
 
@@ -1338,8 +1389,18 @@ function App() {
           <button type="button" onClick={() => setTrackerOpen(true)}>
             Track Order
           </button>
-          <button onClick={() => user ? setAccountOpen((open) => !open) : setAuthOpen(true)}>
-            {user?.name || "Sign in"}
+          <button
+            onClick={() => user ? setAccountOpen((open) => !open) : setAuthOpen(true)}
+            style={{ display: "inline-flex", alignItems: "center", gap: 7 }}
+          >
+            {user?.avatar ? (
+              <img src={user.avatar} alt="" style={{ width: 22, height: 22, borderRadius: "50%", objectFit: "cover" }} />
+            ) : user ? (
+              <span style={{ width: 22, height: 22, borderRadius: "50%", background: "#ea580c", color: "#fff", display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 800 }}>
+                {user.name ? user.name.charAt(0).toUpperCase() : "U"}
+              </span>
+            ) : null}
+            <span>{user ? user.name.split(" ")[0] : "Sign in"}</span>
           </button>
           <button className="cart-button" onClick={() => setCartOpen(true)}>
             Cart <b>{cart.reduce((sum, item) => sum + item.qty, 0)}</b>
@@ -1359,10 +1420,16 @@ function App() {
                 setAccountOpen(false);
                 setProfileNameInput(user.name || "");
                 setProfilePhoneInput(user.phone || "");
+                setProfileAvatarInput(user.avatar || "");
+                setProfileBioInput(user.bio || "");
+                setProfileDietaryInput(user.dietaryPreference || "all");
+                setProfileDobInput(user.dateOfBirth || "");
+                setProfileGenderInput(user.gender || "prefer_not_to_say");
+                setProfileActiveTab("overview");
                 setProfileOpen(true);
               }}
             >
-              Profile, Wallet & Addresses
+              👤 Profile & Account Details
             </button>
             {user.role === "kitchen_owner" && (
               <button type="button" onClick={() => {
@@ -1371,32 +1438,7 @@ function App() {
               }}>🍳 Kitchen Partner Portal</button>
             )}
 
-        {/* Chat Modal */}
-        {chatOrderCode && (
-          <div className="modal-backdrop" onMouseDown={() => setChatOrderCode(null)}>
-            <div className="modal" onMouseDown={e => e.stopPropagation()}>
-              <button className="close" onClick={() => setChatOrderCode(null)}>×</button>
-              <h3>Live Chat – Order {chatOrderCode}</h3>
-              <div className="chat-messages" style={{maxHeight: '300px', overflowY: 'auto', marginBottom: '12px'}}>
-                {chatMessages.map((msg, idx) => (
-                  <div key={idx} className={`chat-bubble ${msg.sender === 'me' ? 'outgoing' : 'incoming'}`}>
-                    <strong>{msg.sender}:</strong> {msg.message}
-                  </div>
-                ))}
-              </div>
-              <div style={{display: 'flex', gap: 8}}>
-                <input
-                  type="text"
-                  placeholder="Type a message…"
-                  value={chatInput}
-                  onChange={e => setChatInput(e.target.value)}
-                  onKeyDown={e => {if (e.key === 'Enter') sendChatMessage();}}
-                />
-                <button type="button" onClick={sendChatMessage}>Send</button>
-              </div>
-            </div>
-          </div>
-        )}
+        
             {user.role === "customer" && (
               <button type="button" onClick={() => {
                 setAccountOpen(false);
@@ -1404,62 +1446,12 @@ function App() {
               }}>My orders</button>
             )}
 
-        {/* Chat Modal */}
-        {chatOrderCode && (
-          <div className="modal-backdrop" onMouseDown={() => setChatOrderCode(null)}>
-            <div className="modal" onMouseDown={e => e.stopPropagation()}>
-              <button className="close" onClick={() => setChatOrderCode(null)}>×</button>
-              <h3>Live Chat – Order {chatOrderCode}</h3>
-              <div className="chat-messages" style={{maxHeight: '300px', overflowY: 'auto', marginBottom: '12px'}}>
-                {chatMessages.map((msg, idx) => (
-                  <div key={idx} className={`chat-bubble ${msg.sender === 'me' ? 'outgoing' : 'incoming'}`}>
-                    <strong>{msg.sender}:</strong> {msg.message}
-                  </div>
-                ))}
-              </div>
-              <div style={{display: 'flex', gap: 8}}>
-                <input
-                  type="text"
-                  placeholder="Type a message…"
-                  value={chatInput}
-                  onChange={e => setChatInput(e.target.value)}
-                  onKeyDown={e => {if (e.key === 'Enter') sendChatMessage();}}
-                />
-                <button type="button" onClick={sendChatMessage}>Send</button>
-              </div>
-            </div>
-          </div>
-        )}
+        
             {user.role === "admin" && (
               <button type="button" onClick={openAdminOrders}>Admin orders</button>
             )}
 
-        {/* Chat Modal */}
-        {chatOrderCode && (
-          <div className="modal-backdrop" onMouseDown={() => setChatOrderCode(null)}>
-            <div className="modal" onMouseDown={e => e.stopPropagation()}>
-              <button className="close" onClick={() => setChatOrderCode(null)}>×</button>
-              <h3>Live Chat – Order {chatOrderCode}</h3>
-              <div className="chat-messages" style={{maxHeight: '300px', overflowY: 'auto', marginBottom: '12px'}}>
-                {chatMessages.map((msg, idx) => (
-                  <div key={idx} className={`chat-bubble ${msg.sender === 'me' ? 'outgoing' : 'incoming'}`}>
-                    <strong>{msg.sender}:</strong> {msg.message}
-                  </div>
-                ))}
-              </div>
-              <div style={{display: 'flex', gap: 8}}>
-                <input
-                  type="text"
-                  placeholder="Type a message…"
-                  value={chatInput}
-                  onChange={e => setChatInput(e.target.value)}
-                  onKeyDown={e => {if (e.key === 'Enter') sendChatMessage();}}
-                />
-                <button type="button" onClick={sendChatMessage}>Send</button>
-              </div>
-            </div>
-          </div>
-        )}
+        
             {user.role === "delivery_partner" && (
               <button type="button" onClick={() => {
                 setAccountOpen(false);
@@ -1467,62 +1459,12 @@ function App() {
               }}>Delivery partner dashboard</button>
             )}
 
-        {/* Chat Modal */}
-        {chatOrderCode && (
-          <div className="modal-backdrop" onMouseDown={() => setChatOrderCode(null)}>
-            <div className="modal" onMouseDown={e => e.stopPropagation()}>
-              <button className="close" onClick={() => setChatOrderCode(null)}>×</button>
-              <h3>Live Chat – Order {chatOrderCode}</h3>
-              <div className="chat-messages" style={{maxHeight: '300px', overflowY: 'auto', marginBottom: '12px'}}>
-                {chatMessages.map((msg, idx) => (
-                  <div key={idx} className={`chat-bubble ${msg.sender === 'me' ? 'outgoing' : 'incoming'}`}>
-                    <strong>{msg.sender}:</strong> {msg.message}
-                  </div>
-                ))}
-              </div>
-              <div style={{display: 'flex', gap: 8}}>
-                <input
-                  type="text"
-                  placeholder="Type a message…"
-                  value={chatInput}
-                  onChange={e => setChatInput(e.target.value)}
-                  onKeyDown={e => {if (e.key === 'Enter') sendChatMessage();}}
-                />
-                <button type="button" onClick={sendChatMessage}>Send</button>
-              </div>
-            </div>
-          </div>
-        )}
+        
             <button type="button" className="logout" onClick={logout}>Logout</button>
           </div>
         )}
 
-        {/* Chat Modal */}
-        {chatOrderCode && (
-          <div className="modal-backdrop" onMouseDown={() => setChatOrderCode(null)}>
-            <div className="modal" onMouseDown={e => e.stopPropagation()}>
-              <button className="close" onClick={() => setChatOrderCode(null)}>×</button>
-              <h3>Live Chat – Order {chatOrderCode}</h3>
-              <div className="chat-messages" style={{maxHeight: '300px', overflowY: 'auto', marginBottom: '12px'}}>
-                {chatMessages.map((msg, idx) => (
-                  <div key={idx} className={`chat-bubble ${msg.sender === 'me' ? 'outgoing' : 'incoming'}`}>
-                    <strong>{msg.sender}:</strong> {msg.message}
-                  </div>
-                ))}
-              </div>
-              <div style={{display: 'flex', gap: 8}}>
-                <input
-                  type="text"
-                  placeholder="Type a message…"
-                  value={chatInput}
-                  onChange={e => setChatInput(e.target.value)}
-                  onKeyDown={e => {if (e.key === 'Enter') sendChatMessage();}}
-                />
-                <button type="button" onClick={sendChatMessage}>Send</button>
-              </div>
-            </div>
-          </div>
-        )}
+        
       </header>
 
       {notice && (
@@ -1584,32 +1526,7 @@ function App() {
                 <img src={restaurant.image} alt="" className="card-image" />
               )}
 
-        {/* Chat Modal */}
-        {chatOrderCode && (
-          <div className="modal-backdrop" onMouseDown={() => setChatOrderCode(null)}>
-            <div className="modal" onMouseDown={e => e.stopPropagation()}>
-              <button className="close" onClick={() => setChatOrderCode(null)}>×</button>
-              <h3>Live Chat – Order {chatOrderCode}</h3>
-              <div className="chat-messages" style={{maxHeight: '300px', overflowY: 'auto', marginBottom: '12px'}}>
-                {chatMessages.map((msg, idx) => (
-                  <div key={idx} className={`chat-bubble ${msg.sender === 'me' ? 'outgoing' : 'incoming'}`}>
-                    <strong>{msg.sender}:</strong> {msg.message}
-                  </div>
-                ))}
-              </div>
-              <div style={{display: 'flex', gap: 8}}>
-                <input
-                  type="text"
-                  placeholder="Type a message…"
-                  value={chatInput}
-                  onChange={e => setChatInput(e.target.value)}
-                  onKeyDown={e => {if (e.key === 'Enter') sendChatMessage();}}
-                />
-                <button type="button" onClick={sendChatMessage}>Send</button>
-              </div>
-            </div>
-          </div>
-        )}
+        
               <div className="card-body">
                 <div className="card-title">
                   <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
@@ -1683,32 +1600,7 @@ function App() {
               </button>
             )}
 
-        {/* Chat Modal */}
-        {chatOrderCode && (
-          <div className="modal-backdrop" onMouseDown={() => setChatOrderCode(null)}>
-            <div className="modal" onMouseDown={e => e.stopPropagation()}>
-              <button className="close" onClick={() => setChatOrderCode(null)}>×</button>
-              <h3>Live Chat – Order {chatOrderCode}</h3>
-              <div className="chat-messages" style={{maxHeight: '300px', overflowY: 'auto', marginBottom: '12px'}}>
-                {chatMessages.map((msg, idx) => (
-                  <div key={idx} className={`chat-bubble ${msg.sender === 'me' ? 'outgoing' : 'incoming'}`}>
-                    <strong>{msg.sender}:</strong> {msg.message}
-                  </div>
-                ))}
-              </div>
-              <div style={{display: 'flex', gap: 8}}>
-                <input
-                  type="text"
-                  placeholder="Type a message…"
-                  value={chatInput}
-                  onChange={e => setChatInput(e.target.value)}
-                  onKeyDown={e => {if (e.key === 'Enter') sendChatMessage();}}
-                />
-                <button type="button" onClick={sendChatMessage}>Send</button>
-              </div>
-            </div>
-          </div>
-        )}
+        
           </div>
           {cart.length === 0 ? (
             <p className="muted" style={{ padding: "40px 0", textAlign: "center" }}>Your cart is empty.</p>
@@ -1741,32 +1633,7 @@ function App() {
             ))
           )}
 
-        {/* Chat Modal */}
-        {chatOrderCode && (
-          <div className="modal-backdrop" onMouseDown={() => setChatOrderCode(null)}>
-            <div className="modal" onMouseDown={e => e.stopPropagation()}>
-              <button className="close" onClick={() => setChatOrderCode(null)}>×</button>
-              <h3>Live Chat – Order {chatOrderCode}</h3>
-              <div className="chat-messages" style={{maxHeight: '300px', overflowY: 'auto', marginBottom: '12px'}}>
-                {chatMessages.map((msg, idx) => (
-                  <div key={idx} className={`chat-bubble ${msg.sender === 'me' ? 'outgoing' : 'incoming'}`}>
-                    <strong>{msg.sender}:</strong> {msg.message}
-                  </div>
-                ))}
-              </div>
-              <div style={{display: 'flex', gap: 8}}>
-                <input
-                  type="text"
-                  placeholder="Type a message…"
-                  value={chatInput}
-                  onChange={e => setChatInput(e.target.value)}
-                  onKeyDown={e => {if (e.key === 'Enter') sendChatMessage();}}
-                />
-                <button type="button" onClick={sendChatMessage}>Send</button>
-              </div>
-            </div>
-          </div>
-        )}
+        
 
           {/* Promo code input & applied pill */}
           {appliedCoupon ? (
@@ -1786,32 +1653,7 @@ function App() {
             </div>
           )}
 
-        {/* Chat Modal */}
-        {chatOrderCode && (
-          <div className="modal-backdrop" onMouseDown={() => setChatOrderCode(null)}>
-            <div className="modal" onMouseDown={e => e.stopPropagation()}>
-              <button className="close" onClick={() => setChatOrderCode(null)}>×</button>
-              <h3>Live Chat – Order {chatOrderCode}</h3>
-              <div className="chat-messages" style={{maxHeight: '300px', overflowY: 'auto', marginBottom: '12px'}}>
-                {chatMessages.map((msg, idx) => (
-                  <div key={idx} className={`chat-bubble ${msg.sender === 'me' ? 'outgoing' : 'incoming'}`}>
-                    <strong>{msg.sender}:</strong> {msg.message}
-                  </div>
-                ))}
-              </div>
-              <div style={{display: 'flex', gap: 8}}>
-                <input
-                  type="text"
-                  placeholder="Type a message…"
-                  value={chatInput}
-                  onChange={e => setChatInput(e.target.value)}
-                  onKeyDown={e => {if (e.key === 'Enter') sendChatMessage();}}
-                />
-                <button type="button" onClick={sendChatMessage}>Send</button>
-              </div>
-            </div>
-          </div>
-        )}
+        
           {couponError && <p className="admin-stream-error" style={{ margin: "4px 0" }}>{couponError}</p>}
 
           {/* Delivery Address Selector */}
@@ -1848,32 +1690,7 @@ function App() {
               </div>
             )}
 
-        {/* Chat Modal */}
-        {chatOrderCode && (
-          <div className="modal-backdrop" onMouseDown={() => setChatOrderCode(null)}>
-            <div className="modal" onMouseDown={e => e.stopPropagation()}>
-              <button className="close" onClick={() => setChatOrderCode(null)}>×</button>
-              <h3>Live Chat – Order {chatOrderCode}</h3>
-              <div className="chat-messages" style={{maxHeight: '300px', overflowY: 'auto', marginBottom: '12px'}}>
-                {chatMessages.map((msg, idx) => (
-                  <div key={idx} className={`chat-bubble ${msg.sender === 'me' ? 'outgoing' : 'incoming'}`}>
-                    <strong>{msg.sender}:</strong> {msg.message}
-                  </div>
-                ))}
-              </div>
-              <div style={{display: 'flex', gap: 8}}>
-                <input
-                  type="text"
-                  placeholder="Type a message…"
-                  value={chatInput}
-                  onChange={e => setChatInput(e.target.value)}
-                  onKeyDown={e => {if (e.key === 'Enter') sendChatMessage();}}
-                />
-                <button type="button" onClick={sendChatMessage}>Send</button>
-              </div>
-            </div>
-          </div>
-        )}
+        
           </div>
 
           {/* Rider Tip Selector */}
@@ -1927,61 +1744,11 @@ function App() {
                 </div>
               )}
 
-        {/* Chat Modal */}
-        {chatOrderCode && (
-          <div className="modal-backdrop" onMouseDown={() => setChatOrderCode(null)}>
-            <div className="modal" onMouseDown={e => e.stopPropagation()}>
-              <button className="close" onClick={() => setChatOrderCode(null)}>×</button>
-              <h3>Live Chat – Order {chatOrderCode}</h3>
-              <div className="chat-messages" style={{maxHeight: '300px', overflowY: 'auto', marginBottom: '12px'}}>
-                {chatMessages.map((msg, idx) => (
-                  <div key={idx} className={`chat-bubble ${msg.sender === 'me' ? 'outgoing' : 'incoming'}`}>
-                    <strong>{msg.sender}:</strong> {msg.message}
-                  </div>
-                ))}
-              </div>
-              <div style={{display: 'flex', gap: 8}}>
-                <input
-                  type="text"
-                  placeholder="Type a message…"
-                  value={chatInput}
-                  onChange={e => setChatInput(e.target.value)}
-                  onKeyDown={e => {if (e.key === 'Enter') sendChatMessage();}}
-                />
-                <button type="button" onClick={sendChatMessage}>Send</button>
-              </div>
-            </div>
-          </div>
-        )}
+        
             </div>
           )}
 
-        {/* Chat Modal */}
-        {chatOrderCode && (
-          <div className="modal-backdrop" onMouseDown={() => setChatOrderCode(null)}>
-            <div className="modal" onMouseDown={e => e.stopPropagation()}>
-              <button className="close" onClick={() => setChatOrderCode(null)}>×</button>
-              <h3>Live Chat – Order {chatOrderCode}</h3>
-              <div className="chat-messages" style={{maxHeight: '300px', overflowY: 'auto', marginBottom: '12px'}}>
-                {chatMessages.map((msg, idx) => (
-                  <div key={idx} className={`chat-bubble ${msg.sender === 'me' ? 'outgoing' : 'incoming'}`}>
-                    <strong>{msg.sender}:</strong> {msg.message}
-                  </div>
-                ))}
-              </div>
-              <div style={{display: 'flex', gap: 8}}>
-                <input
-                  type="text"
-                  placeholder="Type a message…"
-                  value={chatInput}
-                  onChange={e => setChatInput(e.target.value)}
-                  onKeyDown={e => {if (e.key === 'Enter') sendChatMessage();}}
-                />
-                <button type="button" onClick={sendChatMessage}>Send</button>
-              </div>
-            </div>
-          </div>
-        )}
+        
           <div style={{ fontSize: 11, color: "#047857", background: "#ecfdf5", padding: "6px 10px", borderRadius: 8, margin: "8px 0" }}>
             🎉 <b>5% Cashback</b> (approx ₹{Math.max(1, Math.round(subtotal * 0.05))}) will be credited to your wallet upon delivery!
           </div>
@@ -1996,32 +1763,7 @@ function App() {
               </div>
             )}
 
-        {/* Chat Modal */}
-        {chatOrderCode && (
-          <div className="modal-backdrop" onMouseDown={() => setChatOrderCode(null)}>
-            <div className="modal" onMouseDown={e => e.stopPropagation()}>
-              <button className="close" onClick={() => setChatOrderCode(null)}>×</button>
-              <h3>Live Chat – Order {chatOrderCode}</h3>
-              <div className="chat-messages" style={{maxHeight: '300px', overflowY: 'auto', marginBottom: '12px'}}>
-                {chatMessages.map((msg, idx) => (
-                  <div key={idx} className={`chat-bubble ${msg.sender === 'me' ? 'outgoing' : 'incoming'}`}>
-                    <strong>{msg.sender}:</strong> {msg.message}
-                  </div>
-                ))}
-              </div>
-              <div style={{display: 'flex', gap: 8}}>
-                <input
-                  type="text"
-                  placeholder="Type a message…"
-                  value={chatInput}
-                  onChange={e => setChatInput(e.target.value)}
-                  onKeyDown={e => {if (e.key === 'Enter') sendChatMessage();}}
-                />
-                <button type="button" onClick={sendChatMessage}>Send</button>
-              </div>
-            </div>
-          </div>
-        )}
+        
             <div style={{ display: "flex", justifyContent: "space-between", margin: "4px 0" }}>
               <span>Delivery Fee</span><span>{deliveryFee === 0 ? "FREE" : `₹${deliveryFee}`}</span>
             </div>
@@ -2031,64 +1773,14 @@ function App() {
               </div>
             )}
 
-        {/* Chat Modal */}
-        {chatOrderCode && (
-          <div className="modal-backdrop" onMouseDown={() => setChatOrderCode(null)}>
-            <div className="modal" onMouseDown={e => e.stopPropagation()}>
-              <button className="close" onClick={() => setChatOrderCode(null)}>×</button>
-              <h3>Live Chat – Order {chatOrderCode}</h3>
-              <div className="chat-messages" style={{maxHeight: '300px', overflowY: 'auto', marginBottom: '12px'}}>
-                {chatMessages.map((msg, idx) => (
-                  <div key={idx} className={`chat-bubble ${msg.sender === 'me' ? 'outgoing' : 'incoming'}`}>
-                    <strong>{msg.sender}:</strong> {msg.message}
-                  </div>
-                ))}
-              </div>
-              <div style={{display: 'flex', gap: 8}}>
-                <input
-                  type="text"
-                  placeholder="Type a message…"
-                  value={chatInput}
-                  onChange={e => setChatInput(e.target.value)}
-                  onKeyDown={e => {if (e.key === 'Enter') sendChatMessage();}}
-                />
-                <button type="button" onClick={sendChatMessage}>Send</button>
-              </div>
-            </div>
-          </div>
-        )}
+        
             {useWalletBalance && walletDeduction > 0 && (
               <div style={{ display: "flex", justifyContent: "space-between", margin: "4px 0", color: "#16a34a", fontWeight: 700 }}>
                 <span>Wallet Balance Applied</span><span>-₹{walletDeduction}</span>
               </div>
             )}
 
-        {/* Chat Modal */}
-        {chatOrderCode && (
-          <div className="modal-backdrop" onMouseDown={() => setChatOrderCode(null)}>
-            <div className="modal" onMouseDown={e => e.stopPropagation()}>
-              <button className="close" onClick={() => setChatOrderCode(null)}>×</button>
-              <h3>Live Chat – Order {chatOrderCode}</h3>
-              <div className="chat-messages" style={{maxHeight: '300px', overflowY: 'auto', marginBottom: '12px'}}>
-                {chatMessages.map((msg, idx) => (
-                  <div key={idx} className={`chat-bubble ${msg.sender === 'me' ? 'outgoing' : 'incoming'}`}>
-                    <strong>{msg.sender}:</strong> {msg.message}
-                  </div>
-                ))}
-              </div>
-              <div style={{display: 'flex', gap: 8}}>
-                <input
-                  type="text"
-                  placeholder="Type a message…"
-                  value={chatInput}
-                  onChange={e => setChatInput(e.target.value)}
-                  onKeyDown={e => {if (e.key === 'Enter') sendChatMessage();}}
-                />
-                <button type="button" onClick={sendChatMessage}>Send</button>
-              </div>
-            </div>
-          </div>
-        )}
+        
           </div>
 
           <div className="total"><span>To Pay</span><b>₹{finalTotal}</b></div>
@@ -2129,32 +1821,7 @@ function App() {
                 </button>
               )}
 
-        {/* Chat Modal */}
-        {chatOrderCode && (
-          <div className="modal-backdrop" onMouseDown={() => setChatOrderCode(null)}>
-            <div className="modal" onMouseDown={e => e.stopPropagation()}>
-              <button className="close" onClick={() => setChatOrderCode(null)}>×</button>
-              <h3>Live Chat – Order {chatOrderCode}</h3>
-              <div className="chat-messages" style={{maxHeight: '300px', overflowY: 'auto', marginBottom: '12px'}}>
-                {chatMessages.map((msg, idx) => (
-                  <div key={idx} className={`chat-bubble ${msg.sender === 'me' ? 'outgoing' : 'incoming'}`}>
-                    <strong>{msg.sender}:</strong> {msg.message}
-                  </div>
-                ))}
-              </div>
-              <div style={{display: 'flex', gap: 8}}>
-                <input
-                  type="text"
-                  placeholder="Type a message…"
-                  value={chatInput}
-                  onChange={e => setChatInput(e.target.value)}
-                  onKeyDown={e => {if (e.key === 'Enter') sendChatMessage();}}
-                />
-                <button type="button" onClick={sendChatMessage}>Send</button>
-              </div>
-            </div>
-          </div>
-        )}
+        
             </div>
             {authMode === "register" && (
               <>
@@ -2164,121 +1831,21 @@ function App() {
                   <label>Referral Code (Optional)<input name="referralCode" placeholder="e.g. THA1B2" maxLength="12" /></label>
                 )}
 
-        {/* Chat Modal */}
-        {chatOrderCode && (
-          <div className="modal-backdrop" onMouseDown={() => setChatOrderCode(null)}>
-            <div className="modal" onMouseDown={e => e.stopPropagation()}>
-              <button className="close" onClick={() => setChatOrderCode(null)}>×</button>
-              <h3>Live Chat – Order {chatOrderCode}</h3>
-              <div className="chat-messages" style={{maxHeight: '300px', overflowY: 'auto', marginBottom: '12px'}}>
-                {chatMessages.map((msg, idx) => (
-                  <div key={idx} className={`chat-bubble ${msg.sender === 'me' ? 'outgoing' : 'incoming'}`}>
-                    <strong>{msg.sender}:</strong> {msg.message}
-                  </div>
-                ))}
-              </div>
-              <div style={{display: 'flex', gap: 8}}>
-                <input
-                  type="text"
-                  placeholder="Type a message…"
-                  value={chatInput}
-                  onChange={e => setChatInput(e.target.value)}
-                  onKeyDown={e => {if (e.key === 'Enter') sendChatMessage();}}
-                />
-                <button type="button" onClick={sendChatMessage}>Send</button>
-              </div>
-            </div>
-          </div>
-        )}
+        
                 {authRole === "delivery_partner" && (
                   <p className="muted">Partner access starts after admin approval. GPS is shared only after you start it for an active delivery.</p>
                 )}
 
-        {/* Chat Modal */}
-        {chatOrderCode && (
-          <div className="modal-backdrop" onMouseDown={() => setChatOrderCode(null)}>
-            <div className="modal" onMouseDown={e => e.stopPropagation()}>
-              <button className="close" onClick={() => setChatOrderCode(null)}>×</button>
-              <h3>Live Chat – Order {chatOrderCode}</h3>
-              <div className="chat-messages" style={{maxHeight: '300px', overflowY: 'auto', marginBottom: '12px'}}>
-                {chatMessages.map((msg, idx) => (
-                  <div key={idx} className={`chat-bubble ${msg.sender === 'me' ? 'outgoing' : 'incoming'}`}>
-                    <strong>{msg.sender}:</strong> {msg.message}
-                  </div>
-                ))}
-              </div>
-              <div style={{display: 'flex', gap: 8}}>
-                <input
-                  type="text"
-                  placeholder="Type a message…"
-                  value={chatInput}
-                  onChange={e => setChatInput(e.target.value)}
-                  onKeyDown={e => {if (e.key === 'Enter') sendChatMessage();}}
-                />
-                <button type="button" onClick={sendChatMessage}>Send</button>
-              </div>
-            </div>
-          </div>
-        )}
+        
                 {authRole === "kitchen_owner" && (
                   <p className="muted">Kitchen owner portal. Manage dish stocks, open/close status, and live incoming orders.</p>
                 )}
 
-        {/* Chat Modal */}
-        {chatOrderCode && (
-          <div className="modal-backdrop" onMouseDown={() => setChatOrderCode(null)}>
-            <div className="modal" onMouseDown={e => e.stopPropagation()}>
-              <button className="close" onClick={() => setChatOrderCode(null)}>×</button>
-              <h3>Live Chat – Order {chatOrderCode}</h3>
-              <div className="chat-messages" style={{maxHeight: '300px', overflowY: 'auto', marginBottom: '12px'}}>
-                {chatMessages.map((msg, idx) => (
-                  <div key={idx} className={`chat-bubble ${msg.sender === 'me' ? 'outgoing' : 'incoming'}`}>
-                    <strong>{msg.sender}:</strong> {msg.message}
-                  </div>
-                ))}
-              </div>
-              <div style={{display: 'flex', gap: 8}}>
-                <input
-                  type="text"
-                  placeholder="Type a message…"
-                  value={chatInput}
-                  onChange={e => setChatInput(e.target.value)}
-                  onKeyDown={e => {if (e.key === 'Enter') sendChatMessage();}}
-                />
-                <button type="button" onClick={sendChatMessage}>Send</button>
-              </div>
-            </div>
-          </div>
-        )}
+        
               </>
             )}
 
-        {/* Chat Modal */}
-        {chatOrderCode && (
-          <div className="modal-backdrop" onMouseDown={() => setChatOrderCode(null)}>
-            <div className="modal" onMouseDown={e => e.stopPropagation()}>
-              <button className="close" onClick={() => setChatOrderCode(null)}>×</button>
-              <h3>Live Chat – Order {chatOrderCode}</h3>
-              <div className="chat-messages" style={{maxHeight: '300px', overflowY: 'auto', marginBottom: '12px'}}>
-                {chatMessages.map((msg, idx) => (
-                  <div key={idx} className={`chat-bubble ${msg.sender === 'me' ? 'outgoing' : 'incoming'}`}>
-                    <strong>{msg.sender}:</strong> {msg.message}
-                  </div>
-                ))}
-              </div>
-              <div style={{display: 'flex', gap: 8}}>
-                <input
-                  type="text"
-                  placeholder="Type a message…"
-                  value={chatInput}
-                  onChange={e => setChatInput(e.target.value)}
-                  onKeyDown={e => {if (e.key === 'Enter') sendChatMessage();}}
-                />
-                <button type="button" onClick={sendChatMessage}>Send</button>
-              </div>
-            </div>
-          </div>
-        )}
+        
             <label>Email<input name="email" type="email" required /></label>
             <label>Password<input name="password" type="password" minLength="8" required /></label>
             <button className="checkout" type="submit">
@@ -2364,38 +1931,23 @@ function App() {
               >
                 📊 Analytics
               </button>
+              <button
+                type="button"
+                className={`admin-nav-tab ${adminActiveTab === "reviews" ? "active" : ""}`}
+                onClick={() => {
+                  setAdminActiveTab("reviews");
+                  api("/api/admin/reviews").then(setAdminReviews).catch(() => {});
+                }}
+              >
+                ⭐ Reviews ({adminReviews.length})
+              </button>
             </div>
 
             {adminStreamError && (
               <p className="admin-stream-error" role="alert">{adminStreamError}</p>
             )}
 
-        {/* Chat Modal */}
-        {chatOrderCode && (
-          <div className="modal-backdrop" onMouseDown={() => setChatOrderCode(null)}>
-            <div className="modal" onMouseDown={e => e.stopPropagation()}>
-              <button className="close" onClick={() => setChatOrderCode(null)}>×</button>
-              <h3>Live Chat – Order {chatOrderCode}</h3>
-              <div className="chat-messages" style={{maxHeight: '300px', overflowY: 'auto', marginBottom: '12px'}}>
-                {chatMessages.map((msg, idx) => (
-                  <div key={idx} className={`chat-bubble ${msg.sender === 'me' ? 'outgoing' : 'incoming'}`}>
-                    <strong>{msg.sender}:</strong> {msg.message}
-                  </div>
-                ))}
-              </div>
-              <div style={{display: 'flex', gap: 8}}>
-                <input
-                  type="text"
-                  placeholder="Type a message…"
-                  value={chatInput}
-                  onChange={e => setChatInput(e.target.value)}
-                  onKeyDown={e => {if (e.key === 'Enter') sendChatMessage();}}
-                />
-                <button type="button" onClick={sendChatMessage}>Send</button>
-              </div>
-            </div>
-          </div>
-        )}
+        
 
             {/* TAB: Add Kitchen Form */}
             {adminActiveTab === "add-kitchen" && (
@@ -2463,32 +2015,7 @@ function App() {
               </form>
             )}
 
-        {/* Chat Modal */}
-        {chatOrderCode && (
-          <div className="modal-backdrop" onMouseDown={() => setChatOrderCode(null)}>
-            <div className="modal" onMouseDown={e => e.stopPropagation()}>
-              <button className="close" onClick={() => setChatOrderCode(null)}>×</button>
-              <h3>Live Chat – Order {chatOrderCode}</h3>
-              <div className="chat-messages" style={{maxHeight: '300px', overflowY: 'auto', marginBottom: '12px'}}>
-                {chatMessages.map((msg, idx) => (
-                  <div key={idx} className={`chat-bubble ${msg.sender === 'me' ? 'outgoing' : 'incoming'}`}>
-                    <strong>{msg.sender}:</strong> {msg.message}
-                  </div>
-                ))}
-              </div>
-              <div style={{display: 'flex', gap: 8}}>
-                <input
-                  type="text"
-                  placeholder="Type a message…"
-                  value={chatInput}
-                  onChange={e => setChatInput(e.target.value)}
-                  onKeyDown={e => {if (e.key === 'Enter') sendChatMessage();}}
-                />
-                <button type="button" onClick={sendChatMessage}>Send</button>
-              </div>
-            </div>
-          </div>
-        )}
+        
 
             {/* TAB: Add Dish Form */}
             {adminActiveTab === "add-dish" && (
@@ -2566,32 +2093,7 @@ function App() {
               </form>
             )}
 
-        {/* Chat Modal */}
-        {chatOrderCode && (
-          <div className="modal-backdrop" onMouseDown={() => setChatOrderCode(null)}>
-            <div className="modal" onMouseDown={e => e.stopPropagation()}>
-              <button className="close" onClick={() => setChatOrderCode(null)}>×</button>
-              <h3>Live Chat – Order {chatOrderCode}</h3>
-              <div className="chat-messages" style={{maxHeight: '300px', overflowY: 'auto', marginBottom: '12px'}}>
-                {chatMessages.map((msg, idx) => (
-                  <div key={idx} className={`chat-bubble ${msg.sender === 'me' ? 'outgoing' : 'incoming'}`}>
-                    <strong>{msg.sender}:</strong> {msg.message}
-                  </div>
-                ))}
-              </div>
-              <div style={{display: 'flex', gap: 8}}>
-                <input
-                  type="text"
-                  placeholder="Type a message…"
-                  value={chatInput}
-                  onChange={e => setChatInput(e.target.value)}
-                  onKeyDown={e => {if (e.key === 'Enter') sendChatMessage();}}
-                />
-                <button type="button" onClick={sendChatMessage}>Send</button>
-              </div>
-            </div>
-          </div>
-        )}
+        
 
             {/* TAB: Manage Coupons */}
             {adminActiveTab === "coupons" && (
@@ -2694,62 +2196,12 @@ function App() {
                     </table>
                   )}
 
-        {/* Chat Modal */}
-        {chatOrderCode && (
-          <div className="modal-backdrop" onMouseDown={() => setChatOrderCode(null)}>
-            <div className="modal" onMouseDown={e => e.stopPropagation()}>
-              <button className="close" onClick={() => setChatOrderCode(null)}>×</button>
-              <h3>Live Chat – Order {chatOrderCode}</h3>
-              <div className="chat-messages" style={{maxHeight: '300px', overflowY: 'auto', marginBottom: '12px'}}>
-                {chatMessages.map((msg, idx) => (
-                  <div key={idx} className={`chat-bubble ${msg.sender === 'me' ? 'outgoing' : 'incoming'}`}>
-                    <strong>{msg.sender}:</strong> {msg.message}
-                  </div>
-                ))}
-              </div>
-              <div style={{display: 'flex', gap: 8}}>
-                <input
-                  type="text"
-                  placeholder="Type a message…"
-                  value={chatInput}
-                  onChange={e => setChatInput(e.target.value)}
-                  onKeyDown={e => {if (e.key === 'Enter') sendChatMessage();}}
-                />
-                <button type="button" onClick={sendChatMessage}>Send</button>
-              </div>
-            </div>
-          </div>
-        )}
+        
                 </div>
               </div>
             )}
 
-        {/* Chat Modal */}
-        {chatOrderCode && (
-          <div className="modal-backdrop" onMouseDown={() => setChatOrderCode(null)}>
-            <div className="modal" onMouseDown={e => e.stopPropagation()}>
-              <button className="close" onClick={() => setChatOrderCode(null)}>×</button>
-              <h3>Live Chat – Order {chatOrderCode}</h3>
-              <div className="chat-messages" style={{maxHeight: '300px', overflowY: 'auto', marginBottom: '12px'}}>
-                {chatMessages.map((msg, idx) => (
-                  <div key={idx} className={`chat-bubble ${msg.sender === 'me' ? 'outgoing' : 'incoming'}`}>
-                    <strong>{msg.sender}:</strong> {msg.message}
-                  </div>
-                ))}
-              </div>
-              <div style={{display: 'flex', gap: 8}}>
-                <input
-                  type="text"
-                  placeholder="Type a message…"
-                  value={chatInput}
-                  onChange={e => setChatInput(e.target.value)}
-                  onKeyDown={e => {if (e.key === 'Enter') sendChatMessage();}}
-                />
-                <button type="button" onClick={sendChatMessage}>Send</button>
-              </div>
-            </div>
-          </div>
-        )}
+        
 
             {/* TAB: Analytics & Revenue */}
             {adminActiveTab === "analytics" && (
@@ -2800,91 +2252,57 @@ function App() {
                         </div>
                       )}
 
-        {/* Chat Modal */}
-        {chatOrderCode && (
-          <div className="modal-backdrop" onMouseDown={() => setChatOrderCode(null)}>
-            <div className="modal" onMouseDown={e => e.stopPropagation()}>
-              <button className="close" onClick={() => setChatOrderCode(null)}>×</button>
-              <h3>Live Chat – Order {chatOrderCode}</h3>
-              <div className="chat-messages" style={{maxHeight: '300px', overflowY: 'auto', marginBottom: '12px'}}>
-                {chatMessages.map((msg, idx) => (
-                  <div key={idx} className={`chat-bubble ${msg.sender === 'me' ? 'outgoing' : 'incoming'}`}>
-                    <strong>{msg.sender}:</strong> {msg.message}
-                  </div>
-                ))}
-              </div>
-              <div style={{display: 'flex', gap: 8}}>
-                <input
-                  type="text"
-                  placeholder="Type a message…"
-                  value={chatInput}
-                  onChange={e => setChatInput(e.target.value)}
-                  onKeyDown={e => {if (e.key === 'Enter') sendChatMessage();}}
-                />
-                <button type="button" onClick={sendChatMessage}>Send</button>
-              </div>
-            </div>
-          </div>
-        )}
+        
                     </div>
                   </>
                 )}
 
-        {/* Chat Modal */}
-        {chatOrderCode && (
-          <div className="modal-backdrop" onMouseDown={() => setChatOrderCode(null)}>
-            <div className="modal" onMouseDown={e => e.stopPropagation()}>
-              <button className="close" onClick={() => setChatOrderCode(null)}>×</button>
-              <h3>Live Chat – Order {chatOrderCode}</h3>
-              <div className="chat-messages" style={{maxHeight: '300px', overflowY: 'auto', marginBottom: '12px'}}>
-                {chatMessages.map((msg, idx) => (
-                  <div key={idx} className={`chat-bubble ${msg.sender === 'me' ? 'outgoing' : 'incoming'}`}>
-                    <strong>{msg.sender}:</strong> {msg.message}
-                  </div>
-                ))}
-              </div>
-              <div style={{display: 'flex', gap: 8}}>
-                <input
-                  type="text"
-                  placeholder="Type a message…"
-                  value={chatInput}
-                  onChange={e => setChatInput(e.target.value)}
-                  onKeyDown={e => {if (e.key === 'Enter') sendChatMessage();}}
-                />
-                <button type="button" onClick={sendChatMessage}>Send</button>
-              </div>
-            </div>
-          </div>
-        )}
+        
               </div>
             )}
 
-        {/* Chat Modal */}
-        {chatOrderCode && (
-          <div className="modal-backdrop" onMouseDown={() => setChatOrderCode(null)}>
-            <div className="modal" onMouseDown={e => e.stopPropagation()}>
-              <button className="close" onClick={() => setChatOrderCode(null)}>×</button>
-              <h3>Live Chat – Order {chatOrderCode}</h3>
-              <div className="chat-messages" style={{maxHeight: '300px', overflowY: 'auto', marginBottom: '12px'}}>
-                {chatMessages.map((msg, idx) => (
-                  <div key={idx} className={`chat-bubble ${msg.sender === 'me' ? 'outgoing' : 'incoming'}`}>
-                    <strong>{msg.sender}:</strong> {msg.message}
+        
+
+            {/* TAB: Customer Reviews & Ratings */}
+            {adminActiveTab === "reviews" && (
+              <div className="admin-form-card" style={{ marginTop: 14 }}>
+                <h3 style={{ margin: "0 0 12px", fontSize: 16, fontWeight: 800 }}>
+                  Customer Reviews & Ratings ({adminReviews.length})
+                </h3>
+                {adminReviews.length === 0 ? (
+                  <p className="muted">No customer reviews submitted yet.</p>
+                ) : (
+                  <div style={{ display: "grid", gap: 10, maxHeight: 420, overflowY: "auto" }}>
+                    {adminReviews.map((rev) => (
+                      <div key={rev._id} style={{ background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 12, padding: 12 }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                          <div>
+                            <strong>Order #{rev.orderCode}</strong>
+                            <span style={{ fontSize: 12, color: "#64748b", marginLeft: 8 }}>by {rev.reviewerName}</span>
+                          </div>
+                          <span style={{ fontSize: 12, color: "#94a3b8" }}>{new Date(rev.createdAt).toLocaleDateString()}</span>
+                        </div>
+                        <div style={{ display: "flex", gap: 16, margin: "6px 0", fontSize: 13 }}>
+                          <span>🍲 Food Rating: <b>{"★".repeat(rev.foodRating || 5)}</b> ({rev.foodRating}/5)</span>
+                          {rev.deliveryRating && (
+                            <span>🛵 Delivery Rating: <b>{"★".repeat(rev.deliveryRating)}</b> ({rev.deliveryRating}/5)</span>
+                          )}
+                        </div>
+                        {rev.comment && (
+                          <p style={{ margin: "6px 0 0", fontSize: 13, color: "#334155", fontStyle: "italic" }}>
+                            "{rev.comment}"
+                          </p>
+                        )}
+                        <div style={{ fontSize: 11, color: "#64748b", marginTop: 6, display: "flex", gap: 12 }}>
+                          {rev.restaurantId?.name && <span>Kitchen: <b>{rev.restaurantId.name}</b></span>}
+                          {rev.deliveryPartnerName && <span>Rider: <b>{rev.deliveryPartnerName}</b></span>}
+                        </div>
+                      </div>
+                    ))}
                   </div>
-                ))}
+                )}
               </div>
-              <div style={{display: 'flex', gap: 8}}>
-                <input
-                  type="text"
-                  placeholder="Type a message…"
-                  value={chatInput}
-                  onChange={e => setChatInput(e.target.value)}
-                  onKeyDown={e => {if (e.key === 'Enter') sendChatMessage();}}
-                />
-                <button type="button" onClick={sendChatMessage}>Send</button>
-              </div>
-            </div>
-          </div>
-        )}
+            )}
 
             {/* TAB: Rider Applications */}
             {adminActiveTab === "applications" && (
@@ -2904,61 +2322,11 @@ function App() {
                   </div>
                 )}
 
-        {/* Chat Modal */}
-        {chatOrderCode && (
-          <div className="modal-backdrop" onMouseDown={() => setChatOrderCode(null)}>
-            <div className="modal" onMouseDown={e => e.stopPropagation()}>
-              <button className="close" onClick={() => setChatOrderCode(null)}>×</button>
-              <h3>Live Chat – Order {chatOrderCode}</h3>
-              <div className="chat-messages" style={{maxHeight: '300px', overflowY: 'auto', marginBottom: '12px'}}>
-                {chatMessages.map((msg, idx) => (
-                  <div key={idx} className={`chat-bubble ${msg.sender === 'me' ? 'outgoing' : 'incoming'}`}>
-                    <strong>{msg.sender}:</strong> {msg.message}
-                  </div>
-                ))}
-              </div>
-              <div style={{display: 'flex', gap: 8}}>
-                <input
-                  type="text"
-                  placeholder="Type a message…"
-                  value={chatInput}
-                  onChange={e => setChatInput(e.target.value)}
-                  onKeyDown={e => {if (e.key === 'Enter') sendChatMessage();}}
-                />
-                <button type="button" onClick={sendChatMessage}>Send</button>
-              </div>
-            </div>
-          </div>
-        )}
+        
               </section>
             )}
 
-        {/* Chat Modal */}
-        {chatOrderCode && (
-          <div className="modal-backdrop" onMouseDown={() => setChatOrderCode(null)}>
-            <div className="modal" onMouseDown={e => e.stopPropagation()}>
-              <button className="close" onClick={() => setChatOrderCode(null)}>×</button>
-              <h3>Live Chat – Order {chatOrderCode}</h3>
-              <div className="chat-messages" style={{maxHeight: '300px', overflowY: 'auto', marginBottom: '12px'}}>
-                {chatMessages.map((msg, idx) => (
-                  <div key={idx} className={`chat-bubble ${msg.sender === 'me' ? 'outgoing' : 'incoming'}`}>
-                    <strong>{msg.sender}:</strong> {msg.message}
-                  </div>
-                ))}
-              </div>
-              <div style={{display: 'flex', gap: 8}}>
-                <input
-                  type="text"
-                  placeholder="Type a message…"
-                  value={chatInput}
-                  onChange={e => setChatInput(e.target.value)}
-                  onKeyDown={e => {if (e.key === 'Enter') sendChatMessage();}}
-                />
-                <button type="button" onClick={sendChatMessage}>Send</button>
-              </div>
-            </div>
-          </div>
-        )}
+        
 
             {/* TAB: Live Orders */}
             {adminActiveTab === "orders" && (
@@ -2992,62 +2360,12 @@ function App() {
                         </button>
                       )}
 
-        {/* Chat Modal */}
-        {chatOrderCode && (
-          <div className="modal-backdrop" onMouseDown={() => setChatOrderCode(null)}>
-            <div className="modal" onMouseDown={e => e.stopPropagation()}>
-              <button className="close" onClick={() => setChatOrderCode(null)}>×</button>
-              <h3>Live Chat – Order {chatOrderCode}</h3>
-              <div className="chat-messages" style={{maxHeight: '300px', overflowY: 'auto', marginBottom: '12px'}}>
-                {chatMessages.map((msg, idx) => (
-                  <div key={idx} className={`chat-bubble ${msg.sender === 'me' ? 'outgoing' : 'incoming'}`}>
-                    <strong>{msg.sender}:</strong> {msg.message}
-                  </div>
-                ))}
-              </div>
-              <div style={{display: 'flex', gap: 8}}>
-                <input
-                  type="text"
-                  placeholder="Type a message…"
-                  value={chatInput}
-                  onChange={e => setChatInput(e.target.value)}
-                  onKeyDown={e => {if (e.key === 'Enter') sendChatMessage();}}
-                />
-                <button type="button" onClick={sendChatMessage}>Send</button>
-              </div>
-            </div>
-          </div>
-        )}
+        
                       {order.status === "PREPARING" && !order.assignedPartnerId && (
                         <p className="muted">Available in the delivery partner claim queue.</p>
                       )}
 
-        {/* Chat Modal */}
-        {chatOrderCode && (
-          <div className="modal-backdrop" onMouseDown={() => setChatOrderCode(null)}>
-            <div className="modal" onMouseDown={e => e.stopPropagation()}>
-              <button className="close" onClick={() => setChatOrderCode(null)}>×</button>
-              <h3>Live Chat – Order {chatOrderCode}</h3>
-              <div className="chat-messages" style={{maxHeight: '300px', overflowY: 'auto', marginBottom: '12px'}}>
-                {chatMessages.map((msg, idx) => (
-                  <div key={idx} className={`chat-bubble ${msg.sender === 'me' ? 'outgoing' : 'incoming'}`}>
-                    <strong>{msg.sender}:</strong> {msg.message}
-                  </div>
-                ))}
-              </div>
-              <div style={{display: 'flex', gap: 8}}>
-                <input
-                  type="text"
-                  placeholder="Type a message…"
-                  value={chatInput}
-                  onChange={e => setChatInput(e.target.value)}
-                  onKeyDown={e => {if (e.key === 'Enter') sendChatMessage();}}
-                />
-                <button type="button" onClick={sendChatMessage}>Send</button>
-              </div>
-            </div>
-          </div>
-        )}
+        
                       {order.assignedPartnerId && <LiveDeliveryMap order={order} />}
                     </article>
                   ))}
@@ -3055,32 +2373,7 @@ function App() {
               )
             )}
 
-        {/* Chat Modal */}
-        {chatOrderCode && (
-          <div className="modal-backdrop" onMouseDown={() => setChatOrderCode(null)}>
-            <div className="modal" onMouseDown={e => e.stopPropagation()}>
-              <button className="close" onClick={() => setChatOrderCode(null)}>×</button>
-              <h3>Live Chat – Order {chatOrderCode}</h3>
-              <div className="chat-messages" style={{maxHeight: '300px', overflowY: 'auto', marginBottom: '12px'}}>
-                {chatMessages.map((msg, idx) => (
-                  <div key={idx} className={`chat-bubble ${msg.sender === 'me' ? 'outgoing' : 'incoming'}`}>
-                    <strong>{msg.sender}:</strong> {msg.message}
-                  </div>
-                ))}
-              </div>
-              <div style={{display: 'flex', gap: 8}}>
-                <input
-                  type="text"
-                  placeholder="Type a message…"
-                  value={chatInput}
-                  onChange={e => setChatInput(e.target.value)}
-                  onKeyDown={e => {if (e.key === 'Enter') sendChatMessage();}}
-                />
-                <button type="button" onClick={sendChatMessage}>Send</button>
-              </div>
-            </div>
-          </div>
-        )}
+        
           </section>
         </div>
       )}
@@ -3113,64 +2406,14 @@ function App() {
                       </p>
                     )}
 
-        {/* Chat Modal */}
-        {chatOrderCode && (
-          <div className="modal-backdrop" onMouseDown={() => setChatOrderCode(null)}>
-            <div className="modal" onMouseDown={e => e.stopPropagation()}>
-              <button className="close" onClick={() => setChatOrderCode(null)}>×</button>
-              <h3>Live Chat – Order {chatOrderCode}</h3>
-              <div className="chat-messages" style={{maxHeight: '300px', overflowY: 'auto', marginBottom: '12px'}}>
-                {chatMessages.map((msg, idx) => (
-                  <div key={idx} className={`chat-bubble ${msg.sender === 'me' ? 'outgoing' : 'incoming'}`}>
-                    <strong>{msg.sender}:</strong> {msg.message}
-                  </div>
-                ))}
-              </div>
-              <div style={{display: 'flex', gap: 8}}>
-                <input
-                  type="text"
-                  placeholder="Type a message…"
-                  value={chatInput}
-                  onChange={e => setChatInput(e.target.value)}
-                  onKeyDown={e => {if (e.key === 'Enter') sendChatMessage();}}
-                />
-                <button type="button" onClick={sendChatMessage}>Send</button>
-              </div>
-            </div>
-          </div>
-        )}
+        
                     {order.status === "CANCELLED" && (
                       <p style={{ margin: "4px 0", fontSize: 13, color: "#dc2626" }}>
                         <b>Cancelled:</b> {order.cancellationReason || "Order was cancelled"} {order.paymentStatus === "REFUNDED" ? "(Refund Initiated)" : ""}
                       </p>
                     )}
 
-        {/* Chat Modal */}
-        {chatOrderCode && (
-          <div className="modal-backdrop" onMouseDown={() => setChatOrderCode(null)}>
-            <div className="modal" onMouseDown={e => e.stopPropagation()}>
-              <button className="close" onClick={() => setChatOrderCode(null)}>×</button>
-              <h3>Live Chat – Order {chatOrderCode}</h3>
-              <div className="chat-messages" style={{maxHeight: '300px', overflowY: 'auto', marginBottom: '12px'}}>
-                {chatMessages.map((msg, idx) => (
-                  <div key={idx} className={`chat-bubble ${msg.sender === 'me' ? 'outgoing' : 'incoming'}`}>
-                    <strong>{msg.sender}:</strong> {msg.message}
-                  </div>
-                ))}
-              </div>
-              <div style={{display: 'flex', gap: 8}}>
-                <input
-                  type="text"
-                  placeholder="Type a message…"
-                  value={chatInput}
-                  onChange={e => setChatInput(e.target.value)}
-                  onKeyDown={e => {if (e.key === 'Enter') sendChatMessage();}}
-                />
-                <button type="button" onClick={sendChatMessage}>Send</button>
-              </div>
-            </div>
-          </div>
-        )}
+        
                     <div style={{ display: "flex", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
                       {["CONFIRMED", "PREPARING"].includes(order.status) && (
                         <button
@@ -3183,32 +2426,7 @@ function App() {
                         </button>
                       )}
 
-        {/* Chat Modal */}
-        {chatOrderCode && (
-          <div className="modal-backdrop" onMouseDown={() => setChatOrderCode(null)}>
-            <div className="modal" onMouseDown={e => e.stopPropagation()}>
-              <button className="close" onClick={() => setChatOrderCode(null)}>×</button>
-              <h3>Live Chat – Order {chatOrderCode}</h3>
-              <div className="chat-messages" style={{maxHeight: '300px', overflowY: 'auto', marginBottom: '12px'}}>
-                {chatMessages.map((msg, idx) => (
-                  <div key={idx} className={`chat-bubble ${msg.sender === 'me' ? 'outgoing' : 'incoming'}`}>
-                    <strong>{msg.sender}:</strong> {msg.message}
-                  </div>
-                ))}
-              </div>
-              <div style={{display: 'flex', gap: 8}}>
-                <input
-                  type="text"
-                  placeholder="Type a message…"
-                  value={chatInput}
-                  onChange={e => setChatInput(e.target.value)}
-                  onKeyDown={e => {if (e.key === 'Enter') sendChatMessage();}}
-                />
-                <button type="button" onClick={sendChatMessage}>Send</button>
-              </div>
-            </div>
-          </div>
-        )}
+        
                       <button
                         type="button"
                         className="partner-action secondary"
@@ -3233,32 +2451,7 @@ function App() {
                         </button>
                       )}
 
-        {/* Chat Modal */}
-        {chatOrderCode && (
-          <div className="modal-backdrop" onMouseDown={() => setChatOrderCode(null)}>
-            <div className="modal" onMouseDown={e => e.stopPropagation()}>
-              <button className="close" onClick={() => setChatOrderCode(null)}>×</button>
-              <h3>Live Chat – Order {chatOrderCode}</h3>
-              <div className="chat-messages" style={{maxHeight: '300px', overflowY: 'auto', marginBottom: '12px'}}>
-                {chatMessages.map((msg, idx) => (
-                  <div key={idx} className={`chat-bubble ${msg.sender === 'me' ? 'outgoing' : 'incoming'}`}>
-                    <strong>{msg.sender}:</strong> {msg.message}
-                  </div>
-                ))}
-              </div>
-              <div style={{display: 'flex', gap: 8}}>
-                <input
-                  type="text"
-                  placeholder="Type a message…"
-                  value={chatInput}
-                  onChange={e => setChatInput(e.target.value)}
-                  onKeyDown={e => {if (e.key === 'Enter') sendChatMessage();}}
-                />
-                <button type="button" onClick={sendChatMessage}>Send</button>
-              </div>
-            </div>
-          </div>
-        )}
+        
                       {order.status === "DELIVERED" && !reviewedOrders.has(order.orderCode) && (
                         <button
                           type="button"
@@ -3274,95 +2467,20 @@ function App() {
                         </button>
                       )}
 
-        {/* Chat Modal */}
-        {chatOrderCode && (
-          <div className="modal-backdrop" onMouseDown={() => setChatOrderCode(null)}>
-            <div className="modal" onMouseDown={e => e.stopPropagation()}>
-              <button className="close" onClick={() => setChatOrderCode(null)}>×</button>
-              <h3>Live Chat – Order {chatOrderCode}</h3>
-              <div className="chat-messages" style={{maxHeight: '300px', overflowY: 'auto', marginBottom: '12px'}}>
-                {chatMessages.map((msg, idx) => (
-                  <div key={idx} className={`chat-bubble ${msg.sender === 'me' ? 'outgoing' : 'incoming'}`}>
-                    <strong>{msg.sender}:</strong> {msg.message}
-                  </div>
-                ))}
-              </div>
-              <div style={{display: 'flex', gap: 8}}>
-                <input
-                  type="text"
-                  placeholder="Type a message…"
-                  value={chatInput}
-                  onChange={e => setChatInput(e.target.value)}
-                  onKeyDown={e => {if (e.key === 'Enter') sendChatMessage();}}
-                />
-                <button type="button" onClick={sendChatMessage}>Send</button>
-              </div>
-            </div>
-          </div>
-        )}
+        
                     </div>
                     {order.status === "DELIVERED" && reviewedOrders.has(order.orderCode) && (
                       <p className="muted" style={{ marginTop: 4 }}>✓ You reviewed this order</p>
                     )}
 
-        {/* Chat Modal */}
-        {chatOrderCode && (
-          <div className="modal-backdrop" onMouseDown={() => setChatOrderCode(null)}>
-            <div className="modal" onMouseDown={e => e.stopPropagation()}>
-              <button className="close" onClick={() => setChatOrderCode(null)}>×</button>
-              <h3>Live Chat – Order {chatOrderCode}</h3>
-              <div className="chat-messages" style={{maxHeight: '300px', overflowY: 'auto', marginBottom: '12px'}}>
-                {chatMessages.map((msg, idx) => (
-                  <div key={idx} className={`chat-bubble ${msg.sender === 'me' ? 'outgoing' : 'incoming'}`}>
-                    <strong>{msg.sender}:</strong> {msg.message}
-                  </div>
-                ))}
-              </div>
-              <div style={{display: 'flex', gap: 8}}>
-                <input
-                  type="text"
-                  placeholder="Type a message…"
-                  value={chatInput}
-                  onChange={e => setChatInput(e.target.value)}
-                  onKeyDown={e => {if (e.key === 'Enter') sendChatMessage();}}
-                />
-                <button type="button" onClick={sendChatMessage}>Send</button>
-              </div>
-            </div>
-          </div>
-        )}
+        
                     {order.assignedPartnerId && <LiveDeliveryMap order={order} />}
                   </article>
                 ))}
               </div>
             )}
 
-        {/* Chat Modal */}
-        {chatOrderCode && (
-          <div className="modal-backdrop" onMouseDown={() => setChatOrderCode(null)}>
-            <div className="modal" onMouseDown={e => e.stopPropagation()}>
-              <button className="close" onClick={() => setChatOrderCode(null)}>×</button>
-              <h3>Live Chat – Order {chatOrderCode}</h3>
-              <div className="chat-messages" style={{maxHeight: '300px', overflowY: 'auto', marginBottom: '12px'}}>
-                {chatMessages.map((msg, idx) => (
-                  <div key={idx} className={`chat-bubble ${msg.sender === 'me' ? 'outgoing' : 'incoming'}`}>
-                    <strong>{msg.sender}:</strong> {msg.message}
-                  </div>
-                ))}
-              </div>
-              <div style={{display: 'flex', gap: 8}}>
-                <input
-                  type="text"
-                  placeholder="Type a message…"
-                  value={chatInput}
-                  onChange={e => setChatInput(e.target.value)}
-                  onKeyDown={e => {if (e.key === 'Enter') sendChatMessage();}}
-                />
-                <button type="button" onClick={sendChatMessage}>Send</button>
-              </div>
-            </div>
-          </div>
-        )}
+        
           </section>
         </div>
       )}
@@ -3412,32 +2530,7 @@ function App() {
                             </button>
                           )}
 
-        {/* Chat Modal */}
-        {chatOrderCode && (
-          <div className="modal-backdrop" onMouseDown={() => setChatOrderCode(null)}>
-            <div className="modal" onMouseDown={e => e.stopPropagation()}>
-              <button className="close" onClick={() => setChatOrderCode(null)}>×</button>
-              <h3>Live Chat – Order {chatOrderCode}</h3>
-              <div className="chat-messages" style={{maxHeight: '300px', overflowY: 'auto', marginBottom: '12px'}}>
-                {chatMessages.map((msg, idx) => (
-                  <div key={idx} className={`chat-bubble ${msg.sender === 'me' ? 'outgoing' : 'incoming'}`}>
-                    <strong>{msg.sender}:</strong> {msg.message}
-                  </div>
-                ))}
-              </div>
-              <div style={{display: 'flex', gap: 8}}>
-                <input
-                  type="text"
-                  placeholder="Type a message…"
-                  value={chatInput}
-                  onChange={e => setChatInput(e.target.value)}
-                  onKeyDown={e => {if (e.key === 'Enter') sendChatMessage();}}
-                />
-                <button type="button" onClick={sendChatMessage}>Send</button>
-              </div>
-            </div>
-          </div>
-        )}
+        
                           {order.status === "OUT_FOR_DELIVERY" && (
                             <>
                               <div className="partner-actions">
@@ -3453,32 +2546,7 @@ function App() {
                                   <button type="button" className="partner-action secondary" onClick={stopLocationSharing}>Stop sharing</button>
                                 )}
 
-        {/* Chat Modal */}
-        {chatOrderCode && (
-          <div className="modal-backdrop" onMouseDown={() => setChatOrderCode(null)}>
-            <div className="modal" onMouseDown={e => e.stopPropagation()}>
-              <button className="close" onClick={() => setChatOrderCode(null)}>×</button>
-              <h3>Live Chat – Order {chatOrderCode}</h3>
-              <div className="chat-messages" style={{maxHeight: '300px', overflowY: 'auto', marginBottom: '12px'}}>
-                {chatMessages.map((msg, idx) => (
-                  <div key={idx} className={`chat-bubble ${msg.sender === 'me' ? 'outgoing' : 'incoming'}`}>
-                    <strong>{msg.sender}:</strong> {msg.message}
-                  </div>
-                ))}
-              </div>
-              <div style={{display: 'flex', gap: 8}}>
-                <input
-                  type="text"
-                  placeholder="Type a message…"
-                  value={chatInput}
-                  onChange={e => setChatInput(e.target.value)}
-                  onKeyDown={e => {if (e.key === 'Enter') sendChatMessage();}}
-                />
-                <button type="button" onClick={sendChatMessage}>Send</button>
-              </div>
-            </div>
-          </div>
-        )}
+        
                                 <button
                                   type="button"
                                   className="partner-action secondary chat-btn"
@@ -3507,96 +2575,49 @@ function App() {
                             </>
                           )}
 
-        {/* Chat Modal */}
-        {chatOrderCode && (
-          <div className="modal-backdrop" onMouseDown={() => setChatOrderCode(null)}>
-            <div className="modal" onMouseDown={e => e.stopPropagation()}>
-              <button className="close" onClick={() => setChatOrderCode(null)}>×</button>
-              <h3>Live Chat – Order {chatOrderCode}</h3>
-              <div className="chat-messages" style={{maxHeight: '300px', overflowY: 'auto', marginBottom: '12px'}}>
-                {chatMessages.map((msg, idx) => (
-                  <div key={idx} className={`chat-bubble ${msg.sender === 'me' ? 'outgoing' : 'incoming'}`}>
-                    <strong>{msg.sender}:</strong> {msg.message}
-                  </div>
-                ))}
-              </div>
-              <div style={{display: 'flex', gap: 8}}>
-                <input
-                  type="text"
-                  placeholder="Type a message…"
-                  value={chatInput}
-                  onChange={e => setChatInput(e.target.value)}
-                  onKeyDown={e => {if (e.key === 'Enter') sendChatMessage();}}
-                />
-                <button type="button" onClick={sendChatMessage}>Send</button>
-              </div>
-            </div>
-          </div>
-        )}
+        
                           {order.status === "DELIVERED" && <p className="muted">Delivery complete.</p>}
                         </>
                       ) : (
                         <button type="button" className="partner-action" onClick={() => claimDeliveryOrder(order)}>Claim order</button>
                       )}
-
-        {/* Chat Modal */}
-        {chatOrderCode && (
-          <div className="modal-backdrop" onMouseDown={() => setChatOrderCode(null)}>
-            <div className="modal" onMouseDown={e => e.stopPropagation()}>
-              <button className="close" onClick={() => setChatOrderCode(null)}>×</button>
-              <h3>Live Chat – Order {chatOrderCode}</h3>
-              <div className="chat-messages" style={{maxHeight: '300px', overflowY: 'auto', marginBottom: '12px'}}>
-                {chatMessages.map((msg, idx) => (
-                  <div key={idx} className={`chat-bubble ${msg.sender === 'me' ? 'outgoing' : 'incoming'}`}>
-                    <strong>{msg.sender}:</strong> {msg.message}
-                  </div>
-                ))}
-              </div>
-              <div style={{display: 'flex', gap: 8}}>
-                <input
-                  type="text"
-                  placeholder="Type a message…"
-                  value={chatInput}
-                  onChange={e => setChatInput(e.target.value)}
-                  onKeyDown={e => {if (e.key === 'Enter') sendChatMessage();}}
-                />
-                <button type="button" onClick={sendChatMessage}>Send</button>
-              </div>
-            </div>
-          </div>
-        )}
                     </article>
                   );
                 })}
               </div>
             )}
 
-        {/* Chat Modal */}
-        {chatOrderCode && (
-          <div className="modal-backdrop" onMouseDown={() => setChatOrderCode(null)}>
-            <div className="modal" onMouseDown={e => e.stopPropagation()}>
-              <button className="close" onClick={() => setChatOrderCode(null)}>×</button>
-              <h3>Live Chat – Order {chatOrderCode}</h3>
-              <div className="chat-messages" style={{maxHeight: '300px', overflowY: 'auto', marginBottom: '12px'}}>
-                {chatMessages.map((msg, idx) => (
-                  <div key={idx} className={`chat-bubble ${msg.sender === 'me' ? 'outgoing' : 'incoming'}`}>
-                    <strong>{msg.sender}:</strong> {msg.message}
-                  </div>
-                ))}
+            {/* Rider's Received Customer Ratings & Reviews */}
+            <div style={{ marginTop: 20, borderTop: "2px solid #e2e8f0", paddingTop: 14 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                <h3 style={{ margin: 0, fontSize: 15, fontWeight: 800 }}>
+                  ⭐ Customer Delivery Reviews ({deliveryReviews.length})
+                </h3>
+                {deliveryReviews.length > 0 && (
+                  <span style={{ fontSize: 13, color: "#15803d", fontWeight: 700 }}>
+                    Avg: {(deliveryReviews.reduce((sum, r) => sum + (r.deliveryRating || 5), 0) / deliveryReviews.length).toFixed(1)} ★
+                  </span>
+                )}
               </div>
-              <div style={{display: 'flex', gap: 8}}>
-                <input
-                  type="text"
-                  placeholder="Type a message…"
-                  value={chatInput}
-                  onChange={e => setChatInput(e.target.value)}
-                  onKeyDown={e => {if (e.key === 'Enter') sendChatMessage();}}
-                />
-                <button type="button" onClick={sendChatMessage}>Send</button>
-              </div>
+              {deliveryReviews.length === 0 ? (
+                <p className="muted" style={{ fontSize: 12 }}>No customer delivery feedback received yet.</p>
+              ) : (
+                <div style={{ display: "grid", gap: 8, maxHeight: 180, overflowY: "auto" }}>
+                  {deliveryReviews.map((rev) => (
+                    <div key={rev._id} style={{ background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 8, padding: 10, fontSize: 12 }}>
+                      <div style={{ display: "flex", justifyContent: "space-between" }}>
+                        <strong>Order #{rev.orderCode}</strong>
+                        <span style={{ color: "#eab308", fontWeight: 800 }}>{"★".repeat(rev.deliveryRating || 5)} ({rev.deliveryRating || 5}/5)</span>
+                      </div>
+                      {rev.comment && <p style={{ margin: "4px 0 0", color: "#334155", fontStyle: "italic" }}>"{rev.comment}"</p>}
+                      <small style={{ color: "#94a3b8" }}>By {rev.reviewerName} · {new Date(rev.createdAt).toLocaleDateString()}</small>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
-          </div>
-        )}
+
+        
           </section>
         </div>
       )}
@@ -3661,64 +2682,38 @@ function App() {
                     </p>
                   )}
 
-        {/* Chat Modal */}
-        {chatOrderCode && (
-          <div className="modal-backdrop" onMouseDown={() => setChatOrderCode(null)}>
-            <div className="modal" onMouseDown={e => e.stopPropagation()}>
-              <button className="close" onClick={() => setChatOrderCode(null)}>×</button>
-              <h3>Live Chat – Order {chatOrderCode}</h3>
-              <div className="chat-messages" style={{maxHeight: '300px', overflowY: 'auto', marginBottom: '12px'}}>
-                {chatMessages.map((msg, idx) => (
-                  <div key={idx} className={`chat-bubble ${msg.sender === 'me' ? 'outgoing' : 'incoming'}`}>
-                    <strong>{msg.sender}:</strong> {msg.message}
-                  </div>
-                ))}
-              </div>
-              <div style={{display: 'flex', gap: 8}}>
-                <input
-                  type="text"
-                  placeholder="Type a message…"
-                  value={chatInput}
-                  onChange={e => setChatInput(e.target.value)}
-                  onKeyDown={e => {if (e.key === 'Enter') sendChatMessage();}}
-                />
-                <button type="button" onClick={sendChatMessage}>Send</button>
-              </div>
-            </div>
-          </div>
-        )}
+                  {trackedOrder.status === "DELIVERED" && (
+                    <div style={{ marginTop: 10, padding: "10px", background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 10 }}>
+                      <p style={{ margin: "0 0 8px", color: "#15803d", fontWeight: 700 }}>
+                        🎉 Order has been delivered! How was your experience?
+                      </p>
+                      {!reviewedOrders.has(trackedOrder.orderCode) ? (
+                        <button
+                          type="button"
+                          className="partner-action"
+                          style={{ padding: "8px 18px", fontSize: 13 }}
+                          onClick={() => {
+                            setReviewModalOrder(trackedOrder);
+                            setFoodRating(5);
+                            setDeliveryRating(5);
+                            setReviewComment("");
+                          }}
+                        >
+                          ⭐ Rate Food & Delivery Rider
+                        </button>
+                      ) : (
+                        <span style={{ fontSize: 12, color: "#16a34a", fontWeight: 600 }}>
+                          ✓ Thank you! You have reviewed this order.
+                        </span>
+                      )}
+                    </div>
+                  )}
+
                   {trackedOrder.status === "CANCELLED" && (
                     <p style={{ margin: "4px 0", color: "#dc2626" }}>
                       <b>Status:</b> Cancelled ({trackedOrder.cancellationReason || "No reason specified"})
                     </p>
                   )}
-
-        {/* Chat Modal */}
-        {chatOrderCode && (
-          <div className="modal-backdrop" onMouseDown={() => setChatOrderCode(null)}>
-            <div className="modal" onMouseDown={e => e.stopPropagation()}>
-              <button className="close" onClick={() => setChatOrderCode(null)}>×</button>
-              <h3>Live Chat – Order {chatOrderCode}</h3>
-              <div className="chat-messages" style={{maxHeight: '300px', overflowY: 'auto', marginBottom: '12px'}}>
-                {chatMessages.map((msg, idx) => (
-                  <div key={idx} className={`chat-bubble ${msg.sender === 'me' ? 'outgoing' : 'incoming'}`}>
-                    <strong>{msg.sender}:</strong> {msg.message}
-                  </div>
-                ))}
-              </div>
-              <div style={{display: 'flex', gap: 8}}>
-                <input
-                  type="text"
-                  placeholder="Type a message…"
-                  value={chatInput}
-                  onChange={e => setChatInput(e.target.value)}
-                  onKeyDown={e => {if (e.key === 'Enter') sendChatMessage();}}
-                />
-                <button type="button" onClick={sendChatMessage}>Send</button>
-              </div>
-            </div>
-          </div>
-        )}
                 </div>
 
                 {trackedOrder.deliveryLocation && (
@@ -3730,61 +2725,11 @@ function App() {
                   </div>
                 )}
 
-        {/* Chat Modal */}
-        {chatOrderCode && (
-          <div className="modal-backdrop" onMouseDown={() => setChatOrderCode(null)}>
-            <div className="modal" onMouseDown={e => e.stopPropagation()}>
-              <button className="close" onClick={() => setChatOrderCode(null)}>×</button>
-              <h3>Live Chat – Order {chatOrderCode}</h3>
-              <div className="chat-messages" style={{maxHeight: '300px', overflowY: 'auto', marginBottom: '12px'}}>
-                {chatMessages.map((msg, idx) => (
-                  <div key={idx} className={`chat-bubble ${msg.sender === 'me' ? 'outgoing' : 'incoming'}`}>
-                    <strong>{msg.sender}:</strong> {msg.message}
-                  </div>
-                ))}
-              </div>
-              <div style={{display: 'flex', gap: 8}}>
-                <input
-                  type="text"
-                  placeholder="Type a message…"
-                  value={chatInput}
-                  onChange={e => setChatInput(e.target.value)}
-                  onKeyDown={e => {if (e.key === 'Enter') sendChatMessage();}}
-                />
-                <button type="button" onClick={sendChatMessage}>Send</button>
-              </div>
-            </div>
-          </div>
-        )}
+        
               </div>
             )}
 
-        {/* Chat Modal */}
-        {chatOrderCode && (
-          <div className="modal-backdrop" onMouseDown={() => setChatOrderCode(null)}>
-            <div className="modal" onMouseDown={e => e.stopPropagation()}>
-              <button className="close" onClick={() => setChatOrderCode(null)}>×</button>
-              <h3>Live Chat – Order {chatOrderCode}</h3>
-              <div className="chat-messages" style={{maxHeight: '300px', overflowY: 'auto', marginBottom: '12px'}}>
-                {chatMessages.map((msg, idx) => (
-                  <div key={idx} className={`chat-bubble ${msg.sender === 'me' ? 'outgoing' : 'incoming'}`}>
-                    <strong>{msg.sender}:</strong> {msg.message}
-                  </div>
-                ))}
-              </div>
-              <div style={{display: 'flex', gap: 8}}>
-                <input
-                  type="text"
-                  placeholder="Type a message…"
-                  value={chatInput}
-                  onChange={e => setChatInput(e.target.value)}
-                  onKeyDown={e => {if (e.key === 'Enter') sendChatMessage();}}
-                />
-                <button type="button" onClick={sendChatMessage}>Send</button>
-              </div>
-            </div>
-          </div>
-        )}
+        
           </section>
         </div>
       )}
@@ -3881,6 +2826,181 @@ function App() {
           </section>
         </div>
       )}
+      {/* Kitchen Owner Portal Modal */}
+      {kitchenOpen && (user?.role === "kitchen_owner" || user?.role === "admin") && (
+        <div className="modal-backdrop" onMouseDown={() => setKitchenOpen(false)}>
+          <section className="admin-modal" style={{ maxWidth: 640 }} onMouseDown={(e) => e.stopPropagation()}>
+            <div className="admin-dashboard-heading">
+              <div>
+                <h2>🍳 Kitchen Partner Portal</h2>
+                <p className="muted">
+                  {myKitchen ? myKitchen.name : "Loading kitchen…"} · {myKitchen?.location || "Indirapuram, Ghaziabad"}
+                </p>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                {myKitchen && (
+                  <button
+                    type="button"
+                    className={`duty-status-pill ${myKitchen.isOpen !== false ? "online" : "offline"}`}
+                    onClick={toggleKitchenDuty}
+                    title="Toggle Kitchen Open/Closed"
+                  >
+                    <span>{myKitchen.isOpen !== false ? "🟢 Kitchen Open" : "🔴 Closed"}</span>
+                  </button>
+                )}
+                <button type="button" className="close" onClick={() => setKitchenOpen(false)}>×</button>
+              </div>
+            </div>
+
+            {/* Portal Tab Navigation */}
+            <div className="admin-tab-row" style={{ marginBottom: 14 }}>
+              <button
+                type="button"
+                className={`admin-nav-tab ${kitchenTab === "orders" ? "active" : ""}`}
+                onClick={() => setKitchenTab("orders")}
+              >
+                Orders ({kitchenOrders.length})
+              </button>
+              <button
+                type="button"
+                className={`admin-nav-tab ${kitchenTab === "menu" ? "active" : ""}`}
+                onClick={() => setKitchenTab("menu")}
+              >
+                Menu Items ({(myKitchen?.menu || []).length})
+              </button>
+              <button
+                type="button"
+                className={`admin-nav-tab ${kitchenTab === "reviews" ? "active" : ""}`}
+                onClick={() => {
+                  setKitchenTab("reviews");
+                  api("/api/kitchen/my/reviews").then(setKitchenReviews).catch(() => {});
+                }}
+              >
+                Customer Reviews ({kitchenReviews.length})
+              </button>
+            </div>
+
+            {/* TAB 1: Live Kitchen Orders */}
+            {kitchenTab === "orders" && (
+              <div>
+                {kitchenOrders.length === 0 ? (
+                  <p className="muted" style={{ padding: "20px 0", textAlign: "center" }}>No active or past orders for your kitchen yet.</p>
+                ) : (
+                  <div className="admin-order-list" style={{ maxHeight: 420, overflowY: "auto" }}>
+                    {kitchenOrders.map((ord) => (
+                      <article className="admin-order" key={ord._id}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                          <strong>Order #{ord.orderCode}</strong>
+                          <span className={`order-status ${String(ord.status).toLowerCase()}`}>{ord.status}</span>
+                        </div>
+                        <p style={{ margin: "4px 0" }}>
+                          <b>Items:</b> {(ord.items || []).map((i) => `${i.name} ×${i.qty}`).join(", ")}
+                        </p>
+                        <p style={{ margin: "4px 0" }}>
+                          <b>Amount:</b> ₹{ord.grandTotal} ({ord.paymentMethod})
+                        </p>
+                        <p style={{ margin: "4px 0", fontSize: 12, color: "#64748b" }}>
+                          <b>Delivery Partner:</b> {ord.assignedPartnerName || "Awaiting rider assignment"}
+                        </p>
+
+                        <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                          <button
+                            type="button"
+                            className="partner-action secondary chat-btn"
+                            onClick={() => setChatOrderCode(ord.orderCode)}
+                          >
+                            💬 Chat Order
+                          </button>
+                        </div>
+
+                        {/* Live Location of Delivery Partner shown to Kitchen Owner */}
+                        {ord.status === "OUT_FOR_DELIVERY" && ord.deliveryLocation && (
+                          <div style={{ marginTop: 10, background: "#fff7ed", padding: 8, borderRadius: 8, border: "1px solid #fdba74" }}>
+                            <p style={{ margin: "0 0 6px", fontSize: 12, fontWeight: 700, color: "#ea580c" }}>
+                              🛵 Live Rider GPS Location (En Route to Customer):
+                            </p>
+                            <LiveDeliveryMap order={ord} />
+                          </div>
+                        )}
+                      </article>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* TAB 2: Menu Items Availability */}
+            {kitchenTab === "menu" && (
+              <div>
+                <p className="muted" style={{ fontSize: 12, marginBottom: 10 }}>Toggle item stock on or off in real-time:</p>
+                <div style={{ display: "grid", gap: 8, maxHeight: 400, overflowY: "auto" }}>
+                  {(myKitchen?.menu || []).map((dish) => (
+                    <div
+                      key={dish._id}
+                      style={{
+                        display: "flex",
+                        justifyContent: "space-between",
+                        alignItems: "center",
+                        background: "#f8fafc",
+                        border: "1px solid #e2e8f0",
+                        borderRadius: 10,
+                        padding: "10px 14px"
+                      }}
+                    >
+                      <div>
+                        <strong>{dish.name}</strong>
+                        <span style={{ fontSize: 12, color: "#64748b", marginLeft: 8 }}>₹{dish.price} ({dish.category})</span>
+                        <div style={{ fontSize: 11, color: dish.isAvailable !== false ? "#16a34a" : "#dc2626", fontWeight: 700 }}>
+                          {dish.isAvailable !== false ? "● In Stock" : "○ Out of Stock"}
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        className={`partner-action ${dish.isAvailable !== false ? "" : "secondary"}`}
+                        onClick={() => toggleDishStock(dish._id)}
+                        style={{ padding: "6px 12px", fontSize: 12 }}
+                      >
+                        {dish.isAvailable !== false ? "Mark Out of Stock" : "Mark In Stock"}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* TAB 3: Kitchen Customer Reviews */}
+            {kitchenTab === "reviews" && (
+              <div>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+                  <h3 style={{ margin: 0, fontSize: 15 }}>Customer Ratings & Feedback ({kitchenReviews.length})</h3>
+                  {kitchenReviews.length > 0 && (
+                    <span style={{ color: "#eab308", fontWeight: 800 }}>
+                      Avg: {(kitchenReviews.reduce((sum, r) => sum + r.foodRating, 0) / kitchenReviews.length).toFixed(1)} ★
+                    </span>
+                  )}
+                </div>
+                {kitchenReviews.length === 0 ? (
+                  <p className="muted" style={{ padding: "20px 0", textAlign: "center" }}>No customer reviews received yet for your kitchen.</p>
+                ) : (
+                  <div style={{ display: "grid", gap: 10, maxHeight: 400, overflowY: "auto" }}>
+                    {kitchenReviews.map((rev) => (
+                      <div key={rev._id} style={{ background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 10, padding: 12 }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+                          <strong>Order #{rev.orderCode}</strong>
+                          <span style={{ color: "#eab308", fontWeight: 700 }}>{"★".repeat(rev.foodRating || 5)} ({rev.foodRating}/5)</span>
+                        </div>
+                        {rev.comment && <p style={{ margin: "4px 0", fontSize: 13, color: "#334155", fontStyle: "italic" }}>"{rev.comment}"</p>}
+                        <small style={{ color: "#94a3b8" }}>By {rev.reviewerName} · {new Date(rev.createdAt).toLocaleDateString()}</small>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </section>
+        </div>
+      )}
+
       {/* Invoice / Tax Receipt Modal */}
       {invoiceOrder && (
         <div className="modal-backdrop" onMouseDown={() => setInvoiceOrder(null)}>
@@ -3936,32 +3056,7 @@ function App() {
                 </div>
               )}
 
-        {/* Chat Modal */}
-        {chatOrderCode && (
-          <div className="modal-backdrop" onMouseDown={() => setChatOrderCode(null)}>
-            <div className="modal" onMouseDown={e => e.stopPropagation()}>
-              <button className="close" onClick={() => setChatOrderCode(null)}>×</button>
-              <h3>Live Chat – Order {chatOrderCode}</h3>
-              <div className="chat-messages" style={{maxHeight: '300px', overflowY: 'auto', marginBottom: '12px'}}>
-                {chatMessages.map((msg, idx) => (
-                  <div key={idx} className={`chat-bubble ${msg.sender === 'me' ? 'outgoing' : 'incoming'}`}>
-                    <strong>{msg.sender}:</strong> {msg.message}
-                  </div>
-                ))}
-              </div>
-              <div style={{display: 'flex', gap: 8}}>
-                <input
-                  type="text"
-                  placeholder="Type a message…"
-                  value={chatInput}
-                  onChange={e => setChatInput(e.target.value)}
-                  onKeyDown={e => {if (e.key === 'Enter') sendChatMessage();}}
-                />
-                <button type="button" onClick={sendChatMessage}>Send</button>
-              </div>
-            </div>
-          </div>
-        )}
+        
               <div className="invoice-breakdown-row">
                 <span>Delivery Fee</span>
                 <span>₹{invoiceOrder.deliveryFee || 0}</span>
@@ -3977,32 +3072,7 @@ function App() {
                 </div>
               )}
 
-        {/* Chat Modal */}
-        {chatOrderCode && (
-          <div className="modal-backdrop" onMouseDown={() => setChatOrderCode(null)}>
-            <div className="modal" onMouseDown={e => e.stopPropagation()}>
-              <button className="close" onClick={() => setChatOrderCode(null)}>×</button>
-              <h3>Live Chat – Order {chatOrderCode}</h3>
-              <div className="chat-messages" style={{maxHeight: '300px', overflowY: 'auto', marginBottom: '12px'}}>
-                {chatMessages.map((msg, idx) => (
-                  <div key={idx} className={`chat-bubble ${msg.sender === 'me' ? 'outgoing' : 'incoming'}`}>
-                    <strong>{msg.sender}:</strong> {msg.message}
-                  </div>
-                ))}
-              </div>
-              <div style={{display: 'flex', gap: 8}}>
-                <input
-                  type="text"
-                  placeholder="Type a message…"
-                  value={chatInput}
-                  onChange={e => setChatInput(e.target.value)}
-                  onKeyDown={e => {if (e.key === 'Enter') sendChatMessage();}}
-                />
-                <button type="button" onClick={sendChatMessage}>Send</button>
-              </div>
-            </div>
-          </div>
-        )}
+        
               <div className="invoice-total-row">
                 <span>Total Paid</span>
                 <span>₹{invoiceOrder.grandTotal}</span>
@@ -4122,184 +3192,523 @@ function App() {
               </div>
             )}
 
-        {/* Chat Modal */}
-        {chatOrderCode && (
-          <div className="modal-backdrop" onMouseDown={() => setChatOrderCode(null)}>
-            <div className="modal" onMouseDown={e => e.stopPropagation()}>
-              <button className="close" onClick={() => setChatOrderCode(null)}>×</button>
-              <h3>Live Chat – Order {chatOrderCode}</h3>
-              <div className="chat-messages" style={{maxHeight: '300px', overflowY: 'auto', marginBottom: '12px'}}>
-                {chatMessages.map((msg, idx) => (
-                  <div key={idx} className={`chat-bubble ${msg.sender === 'me' ? 'outgoing' : 'incoming'}`}>
-                    <strong>{msg.sender}:</strong> {msg.message}
-                  </div>
-                ))}
-              </div>
-              <div style={{display: 'flex', gap: 8}}>
-                <input
-                  type="text"
-                  placeholder="Type a message…"
-                  value={chatInput}
-                  onChange={e => setChatInput(e.target.value)}
-                  onKeyDown={e => {if (e.key === 'Enter') sendChatMessage();}}
-                />
-                <button type="button" onClick={sendChatMessage}>Send</button>
-              </div>
-            </div>
-          </div>
-        )}
+        
           </section>
         </div>
       )}
 
-      {/* Customer Profile & Address Manager Modal */}
+      {/* Swiggy/Zomato/Zepto-style Profile & Address Manager Modal */}
       {profileOpen && user && (
         <div className="modal-backdrop" onMouseDown={() => setProfileOpen(false)}>
-          <section className="profile-modal" onMouseDown={(e) => e.stopPropagation()}>
-            <div className="admin-dashboard-heading">
-              <div>
-                <h2>Profile & Saved Addresses</h2>
-                <p className="muted">{user.email} · {String(user.role).replace("_", " ").toUpperCase()}</p>
+          <section className="profile-modal enhanced-profile-modal" onMouseDown={(e) => e.stopPropagation()}>
+            {/* Modal Header */}
+            <div className="admin-dashboard-heading" style={{ borderBottom: "1px solid #e2e8f0", paddingBottom: 12, marginBottom: 14 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+                <div className="profile-avatar-wrapper">
+                  {user.avatar ? (
+                    <img src={user.avatar} alt={user.name} className="profile-avatar-img" />
+                  ) : (
+                    <div className="profile-avatar-placeholder">
+                      {user.name ? user.name.charAt(0).toUpperCase() : "U"}
+                    </div>
+                  )}
+                  <span className="profile-role-badge">
+                    {user.role === "admin" ? "🛡️ Admin" : user.role === "delivery_partner" ? "🛵 Delivery" : user.role === "kitchen_owner" ? "🍳 Kitchen" : "🌟 Foodie"}
+                  </span>
+                </div>
+                <div>
+                  <h2 style={{ margin: 0, fontSize: 20 }}>{user.name}</h2>
+                  <p className="muted" style={{ margin: "2px 0 0", fontSize: 13 }}>
+                    {user.email} {user.phone && `· ${user.phone}`}
+                  </p>
+                </div>
               </div>
               <button type="button" className="close" onClick={() => setProfileOpen(false)}>×</button>
             </div>
 
-            {/* Profile Info Form */}
-            <form className="profile-section-card" onSubmit={updateProfile}>
-              <h3>Personal Details</h3>
-              <div className="admin-form-grid" style={{ marginBottom: 10 }}>
+            {/* Quick Stats Banner (Wallet, Orders, Role) */}
+            <div className="profile-quick-stats">
+              <div className="stat-pill">
+                <span className="stat-icon">💰</span>
                 <div>
-                  <label>Full Name</label>
-                  <input
-                    value={profileNameInput}
-                    onChange={(e) => setProfileNameInput(e.target.value)}
-                    placeholder="Your Name"
-                    required
-                  />
-                </div>
-                <div>
-                  <label>Phone Number</label>
-                  <input
-                    value={profilePhoneInput}
-                    onChange={(e) => setProfilePhoneInput(e.target.value)}
-                    placeholder="10-digit mobile"
-                  />
+                  <small>Wallet Balance</small>
+                  <strong>₹{user.walletBalance || walletData.balance || 0}</strong>
                 </div>
               </div>
-              <button type="submit" className="partner-action" style={{ padding: "6px 16px", fontSize: 12 }}>
-                Update Info
+              <div className="stat-pill">
+                <span className="stat-icon">📦</span>
+                <div>
+                  <small>Saved Addresses</small>
+                  <strong>{(user.addresses || []).length} Places</strong>
+                </div>
+              </div>
+              <div className="stat-pill">
+                <span className="stat-icon">🥗</span>
+                <div>
+                  <small>Dietary Mode</small>
+                  <strong style={{ textTransform: "capitalize" }}>{(user.dietaryPreference || "All").replace("_", " ")}</strong>
+                </div>
+              </div>
+            </div>
+
+            {/* Navigation Tabs (Zomato/Swiggy style) */}
+            <div className="profile-nav-tabs">
+              <button
+                type="button"
+                className={`profile-tab-btn ${profileActiveTab === "overview" ? "active" : ""}`}
+                onClick={() => setProfileActiveTab("overview")}
+              >
+                📋 Overview
               </button>
-            </form>
-
-            {/* Saved Addresses List */}
-            <div className="profile-section-card">
-              <h3>Saved Delivery Addresses ({(user.addresses || []).length})</h3>
-              {(!user.addresses || user.addresses.length === 0) ? (
-                <p className="muted" style={{ fontSize: 13 }}>No saved addresses yet.</p>
-              ) : (
-                <div style={{ maxHeight: 180, overflowY: "auto", marginBottom: 10 }}>
-                  {user.addresses.map((a) => (
-                    <div className="address-item-card" key={a._id || a.address}>
-                      <div>
-                        <span className="addr-label">{a.label || "Home"}</span>
-                        <span style={{ fontSize: 13, color: "#334155" }}>{a.address}</span>
-                      </div>
-                      {a._id && (
-                        <button
-                          type="button"
-                          className="addr-delete-btn"
-                          onClick={() => deleteProfileAddress(a._id)}
-                        >
-                          ✕ Delete
-                        </button>
-                      )}
-
-        {/* Chat Modal */}
-        {chatOrderCode && (
-          <div className="modal-backdrop" onMouseDown={() => setChatOrderCode(null)}>
-            <div className="modal" onMouseDown={e => e.stopPropagation()}>
-              <button className="close" onClick={() => setChatOrderCode(null)}>×</button>
-              <h3>Live Chat – Order {chatOrderCode}</h3>
-              <div className="chat-messages" style={{maxHeight: '300px', overflowY: 'auto', marginBottom: '12px'}}>
-                {chatMessages.map((msg, idx) => (
-                  <div key={idx} className={`chat-bubble ${msg.sender === 'me' ? 'outgoing' : 'incoming'}`}>
-                    <strong>{msg.sender}:</strong> {msg.message}
-                  </div>
-                ))}
-              </div>
-              <div style={{display: 'flex', gap: 8}}>
-                <input
-                  type="text"
-                  placeholder="Type a message…"
-                  value={chatInput}
-                  onChange={e => setChatInput(e.target.value)}
-                  onKeyDown={e => {if (e.key === 'Enter') sendChatMessage();}}
-                />
-                <button type="button" onClick={sendChatMessage}>Send</button>
-              </div>
+              <button
+                type="button"
+                className={`profile-tab-btn ${profileActiveTab === "edit" ? "active" : ""}`}
+                onClick={() => {
+                  setProfileNameInput(user.name || "");
+                  setProfilePhoneInput(user.phone || "");
+                  setProfileAvatarInput(user.avatar || "");
+                  setProfileBioInput(user.bio || "");
+                  setProfileDietaryInput(user.dietaryPreference || "all");
+                  setProfileDobInput(user.dateOfBirth || "");
+                  setProfileGenderInput(user.gender || "prefer_not_to_say");
+                  setProfileActiveTab("edit");
+                }}
+              >
+                ✏️ Edit Profile
+              </button>
+              <button
+                type="button"
+                className={`profile-tab-btn ${profileActiveTab === "addresses" ? "active" : ""}`}
+                onClick={() => setProfileActiveTab("addresses")}
+              >
+                📍 Addresses ({(user.addresses || []).length})
+              </button>
+              <button
+                type="button"
+                className={`profile-tab-btn ${profileActiveTab === "preferences" ? "active" : ""}`}
+                onClick={() => setProfileActiveTab("preferences")}
+              >
+                ⚙️ Preferences
+              </button>
             </div>
-          </div>
-        )}
+
+            {/* TAB 1: OVERVIEW / READ PROFILE */}
+            {profileActiveTab === "overview" && (
+              <div className="profile-tab-content">
+                <div className="profile-details-grid">
+                  <div className="profile-detail-item">
+                    <span className="detail-label">Full Name</span>
+                    <span className="detail-value">{user.name}</span>
+                  </div>
+                  <div className="profile-detail-item">
+                    <span className="detail-label">Registered Email</span>
+                    <span className="detail-value">{user.email}</span>
+                  </div>
+                  <div className="profile-detail-item">
+                    <span className="detail-label">Phone Number</span>
+                    <span className="detail-value">{user.phone || "Not set (Click Edit to add)"}</span>
+                  </div>
+                  <div className="profile-detail-item">
+                    <span className="detail-label">Account Role</span>
+                    <span className="detail-value" style={{ textTransform: "capitalize" }}>
+                      {String(user.role).replace("_", " ")}
+                    </span>
+                  </div>
+                  <div className="profile-detail-item">
+                    <span className="detail-label">Dietary Preference</span>
+                    <span className="detail-value" style={{ textTransform: "capitalize" }}>
+                      {user.dietaryPreference === "veg_only" ? "🟢 Pure Veg" : user.dietaryPreference === "vegan" ? "🌱 Vegan" : user.dietaryPreference === "non_veg" ? "🍗 Non-Veg" : "🍽️ No Restriction (All)"}
+                    </span>
+                  </div>
+                  <div className="profile-detail-item">
+                    <span className="detail-label">Birthday</span>
+                    <span className="detail-value">{user.dateOfBirth || "Add birthday for special offers"}</span>
+                  </div>
+                  {user.bio && (
+                    <div className="profile-detail-item" style={{ gridColumn: "1 / -1" }}>
+                      <span className="detail-label">Bio / Food Tagline</span>
+                      <span className="detail-value">“{user.bio}”</span>
                     </div>
-                  ))}
+                  )}
                 </div>
-              )}
 
-        {/* Chat Modal */}
-        {chatOrderCode && (
-          <div className="modal-backdrop" onMouseDown={() => setChatOrderCode(null)}>
-            <div className="modal" onMouseDown={e => e.stopPropagation()}>
-              <button className="close" onClick={() => setChatOrderCode(null)}>×</button>
-              <h3>Live Chat – Order {chatOrderCode}</h3>
-              <div className="chat-messages" style={{maxHeight: '300px', overflowY: 'auto', marginBottom: '12px'}}>
-                {chatMessages.map((msg, idx) => (
-                  <div key={idx} className={`chat-bubble ${msg.sender === 'me' ? 'outgoing' : 'incoming'}`}>
-                    <strong>{msg.sender}:</strong> {msg.message}
-                  </div>
-                ))}
-              </div>
-              <div style={{display: 'flex', gap: 8}}>
-                <input
-                  type="text"
-                  placeholder="Type a message…"
-                  value={chatInput}
-                  onChange={e => setChatInput(e.target.value)}
-                  onKeyDown={e => {if (e.key === 'Enter') sendChatMessage();}}
-                />
-                <button type="button" onClick={sendChatMessage}>Send</button>
-              </div>
-            </div>
-          </div>
-        )}
-
-              {/* Add New Address Sub-form */}
-              <form onSubmit={addProfileAddress} style={{ borderTop: "1px dashed #cbd5e1", paddingTop: 10 }}>
-                <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
-                  <select
-                    value={profileAddrLabel}
-                    onChange={(e) => setProfileAddrLabel(e.target.value)}
-                    style={{ width: 100, padding: 6, borderRadius: 8, border: "1px solid #cbd5e1", fontSize: 12 }}
+                <div style={{ marginTop: 16, display: "flex", gap: 10 }}>
+                  <button
+                    type="button"
+                    className="partner-action"
+                    onClick={() => setProfileActiveTab("edit")}
+                    style={{ flex: 1, padding: "10px 18px", fontSize: 13 }}
                   >
-                    <option value="Home">Home</option>
-                    <option value="Office">Office</option>
-                    <option value="Other">Other</option>
-                  </select>
-                  <input
-                    value={profileAddrText}
-                    onChange={(e) => setProfileAddrText(e.target.value)}
-                    placeholder="Flat/House no, Area, Landmark, City..."
-                    style={{ flex: 1, padding: 6, borderRadius: 8, border: "1px solid #cbd5e1", fontSize: 12 }}
-                    required
-                  />
+                    ✏️ Edit Personal Info & Photo
+                  </button>
+                  <button
+                    type="button"
+                    className="pill"
+                    onClick={() => setProfileActiveTab("addresses")}
+                    style={{ padding: "10px 18px", fontSize: 13, border: "1px solid #cbd5e1" }}
+                  >
+                    📍 Manage Addresses
+                  </button>
                 </div>
-                <button type="submit" className="partner-action" style={{ padding: "6px 16px", fontSize: 12 }}>
-                  + Add Address
-                </button>
+              </div>
+            )}
+
+            {/* TAB 2: EDIT PROFILE FORM */}
+            {profileActiveTab === "edit" && (
+              <form className="profile-tab-content" onSubmit={updateProfile}>
+                <div className="avatar-picker-section">
+                  <label style={{ fontSize: 13, fontWeight: 700, display: "block", marginBottom: 6 }}>
+                    Profile Photo / Avatar
+                  </label>
+                  <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 10 }}>
+                    {profileAvatarInput ? (
+                      <img src={profileAvatarInput} alt="Preview" className="avatar-preview-circle" />
+                    ) : (
+                      <div className="avatar-preview-circle placeholder">
+                        {profileNameInput ? profileNameInput.charAt(0).toUpperCase() : "U"}
+                      </div>
+                    )}
+                    <input
+                      type="url"
+                      value={profileAvatarInput}
+                      onChange={(e) => setProfileAvatarInput(e.target.value)}
+                      placeholder="Paste image URL (https://...)"
+                      style={{ flex: 1, padding: 8, borderRadius: 8, border: "1px solid #cbd5e1", fontSize: 13 }}
+                    />
+                  </div>
+                  {/* Preset Avatar Suggestions */}
+                  <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 14 }}>
+                    <small style={{ color: "#64748b" }}>Presets:</small>
+                    {[
+                      { icon: "👨‍🍳", url: "https://images.unsplash.com/photo-1577219491135-ce391730fb2c?w=150" },
+                      { icon: "🍕", url: "https://images.unsplash.com/photo-1513104890138-7c749659a591?w=150" },
+                      { icon: "🧑‍💼", url: "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150" },
+                      { icon: "🛵", url: "https://images.unsplash.com/photo-1526367790999-0150786686a2?w=150" }
+                    ].map((p, idx) => (
+                      <button
+                        key={idx}
+                        type="button"
+                        onClick={() => setProfileAvatarInput(p.url)}
+                        style={{ background: "#f1f5f9", border: "1px solid #cbd5e1", borderRadius: "50%", width: 32, height: 32, cursor: "pointer", fontSize: 16 }}
+                        title="Use preset"
+                      >
+                        {p.icon}
+                      </button>
+                    ))}
+                    {profileAvatarInput && (
+                      <button
+                        type="button"
+                        onClick={() => setProfileAvatarInput("")}
+                        style={{ background: "none", border: "none", color: "#ef4444", fontSize: 11, cursor: "pointer" }}
+                      >
+                        Clear
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                <div className="admin-form-grid" style={{ marginBottom: 12 }}>
+                  <div>
+                    <label>Full Name *</label>
+                    <input
+                      value={profileNameInput}
+                      onChange={(e) => setProfileNameInput(e.target.value)}
+                      placeholder="Your full name"
+                      required
+                    />
+                  </div>
+                  <div>
+                    <label>Phone Number</label>
+                    <input
+                      value={profilePhoneInput}
+                      onChange={(e) => setProfilePhoneInput(e.target.value)}
+                      placeholder="+91 9876543210"
+                    />
+                  </div>
+                  <div>
+                    <label>Date of Birth</label>
+                    <input
+                      type="date"
+                      value={profileDobInput}
+                      onChange={(e) => setProfileDobInput(e.target.value)}
+                    />
+                  </div>
+                  <div>
+                    <label>Gender</label>
+                    <select
+                      value={profileGenderInput}
+                      onChange={(e) => setProfileGenderInput(e.target.value)}
+                      style={{ width: "100%", padding: 10, borderRadius: 10, border: "1px solid #cbd5e1", fontSize: 13 }}
+                    >
+                      <option value="prefer_not_to_say">Prefer not to say</option>
+                      <option value="female">Female</option>
+                      <option value="male">Male</option>
+                      <option value="other">Other</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div style={{ marginBottom: 14 }}>
+                  <label>Bio / Food Motto</label>
+                  <input
+                    value={profileBioInput}
+                    onChange={(e) => setProfileBioInput(e.target.value)}
+                    placeholder="e.g. Biryani lover & chai enthusiast"
+                    maxLength={160}
+                    style={{ width: "100%", padding: 10, borderRadius: 10, border: "1px solid #cbd5e1", fontSize: 13 }}
+                  />
+                  <small style={{ color: "#94a3b8", display: "block", marginTop: 4 }}>
+                    {160 - profileBioInput.length} characters remaining
+                  </small>
+                </div>
+
+                <div style={{ display: "flex", gap: 10 }}>
+                  <button type="submit" className="partner-action" style={{ flex: 1, padding: "10px 20px" }}>
+                    💾 Save Profile Changes
+                  </button>
+                  <button
+                    type="button"
+                    className="pill"
+                    onClick={() => setProfileActiveTab("overview")}
+                    style={{ padding: "10px 18px", border: "1px solid #cbd5e1" }}
+                  >
+                    Cancel
+                  </button>
+                </div>
               </form>
-            </div>
+            )}
+
+            {/* TAB 3: SAVED ADDRESSES (Add, View, Edit, Delete) */}
+            {profileActiveTab === "addresses" && (
+              <div className="profile-tab-content">
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                  <h3 style={{ margin: 0, fontSize: 14 }}>Your Delivery Locations ({(user.addresses || []).length})</h3>
+                  <small style={{ color: "#64748b" }}>Zomato/Swiggy instant select</small>
+                </div>
+
+                {(!user.addresses || user.addresses.length === 0) ? (
+                  <p className="muted" style={{ fontSize: 13, textAlign: "center", padding: "16px 0" }}>
+                    No saved addresses found. Add your Home, Work, or Friends' place below!
+                  </p>
+                ) : (
+                  <div style={{ maxHeight: 220, overflowY: "auto", marginBottom: 14, paddingRight: 4 }}>
+                    {user.addresses.map((a) => (
+                      <div className="address-item-card" key={a._id || a.address}>
+                        <div style={{ flex: 1 }}>
+                          <span className="addr-label">
+                            {a.label === "Home" ? "🏠 Home" : a.label === "Office" || a.label === "Work" ? "🏢 Work" : "📍 " + (a.label || "Other")}
+                          </span>
+                          <span style={{ fontSize: 13, color: "#1e293b", fontWeight: 500, display: "block", marginTop: 4 }}>
+                            {a.address}
+                          </span>
+                          {selectedAddress === a.address && (
+                            <span style={{ fontSize: 11, color: "#16a34a", fontWeight: 700 }}>✓ Selected for current delivery</span>
+                          )}
+                        </div>
+                        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                          <button
+                            type="button"
+                            className="addr-action-btn select-btn"
+                            onClick={() => {
+                              setSelectedAddress(a.address);
+                              setNotice(`Selected address: ${a.label} (${a.address})`);
+                            }}
+                            title="Select as current address"
+                          >
+                            Select
+                          </button>
+                          {a._id && (
+                            <button
+                              type="button"
+                              className="addr-action-btn edit-btn"
+                              onClick={() => {
+                                setEditingAddrId(a._id);
+                                setEditAddrLabel(a.label || "Home");
+                                setEditAddrText(a.address);
+                              }}
+                              title="Edit address"
+                            >
+                              ✏️
+                            </button>
+                          )}
+                          {a._id && (
+                            <button
+                              type="button"
+                              className="addr-delete-btn"
+                              onClick={() => deleteProfileAddress(a._id)}
+                              title="Delete address"
+                            >
+                              ✕
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Edit Existing Address Inline Form */}
+                {editingAddrId && (
+                  <form onSubmit={saveEditedAddress} className="address-edit-box">
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                      <strong style={{ fontSize: 13, color: "#ea580c" }}>Edit Saved Address</strong>
+                      <button
+                        type="button"
+                        onClick={() => setEditingAddrId(null)}
+                        style={{ background: "none", border: "none", color: "#64748b", cursor: "pointer", fontSize: 12 }}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                    <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+                      <select
+                        value={editAddrLabel}
+                        onChange={(e) => setEditAddrLabel(e.target.value)}
+                        style={{ width: 110, padding: 8, borderRadius: 8, border: "1px solid #cbd5e1", fontSize: 12 }}
+                      >
+                        <option value="Home">Home</option>
+                        <option value="Office">Office</option>
+                        <option value="Hostel">Hostel</option>
+                        <option value="Other">Other</option>
+                      </select>
+                      <input
+                        value={editAddrText}
+                        onChange={(e) => setEditAddrText(e.target.value)}
+                        placeholder="House/Flat No, Area, Landmark, City..."
+                        style={{ flex: 1, padding: 8, borderRadius: 8, border: "1px solid #cbd5e1", fontSize: 12 }}
+                        required
+                      />
+                    </div>
+                    <button type="submit" className="partner-action" style={{ padding: "6px 16px", fontSize: 12 }}>
+                      ✓ Save Changes
+                    </button>
+                  </form>
+                )}
+
+                {/* Add New Address Sub-form */}
+                <form onSubmit={addProfileAddress} style={{ borderTop: "1px dashed #cbd5e1", paddingTop: 12, marginTop: 10 }}>
+                  <span style={{ fontSize: 12, fontWeight: 700, color: "#475569", display: "block", marginBottom: 6 }}>
+                    + Add New Delivery Location
+                  </span>
+                  <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+                    <select
+                      value={profileAddrLabel}
+                      onChange={(e) => setProfileAddrLabel(e.target.value)}
+                      style={{ width: 110, padding: 8, borderRadius: 8, border: "1px solid #cbd5e1", fontSize: 12 }}
+                    >
+                      <option value="Home">Home</option>
+                      <option value="Office">Office</option>
+                      <option value="Hostel">Hostel</option>
+                      <option value="Other">Other</option>
+                    </select>
+                    <input
+                      value={profileAddrText}
+                      onChange={(e) => setProfileAddrText(e.target.value)}
+                      placeholder="House/Flat no, Floor, Street, Landmark..."
+                      style={{ flex: 1, padding: 8, borderRadius: 8, border: "1px solid #cbd5e1", fontSize: 12 }}
+                      required
+                    />
+                  </div>
+                  <button type="submit" className="partner-action" style={{ padding: "6px 18px", fontSize: 12 }}>
+                    + Save Address
+                  </button>
+                </form>
+              </div>
+            )}
+
+            {/* TAB 4: PREFERENCES (Food dietary, Notifications) */}
+            {profileActiveTab === "preferences" && (
+              <div className="profile-tab-content">
+                <div className="profile-section-card" style={{ marginBottom: 12 }}>
+                  <h3 style={{ margin: "0 0 8px", fontSize: 13 }}>Dietary & Food Habits</h3>
+                  <p className="muted" style={{ fontSize: 12, margin: "0 0 10px" }}>
+                    Configure your dietary filters like in Swiggy or Zomato:
+                  </p>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                    {[
+                      { id: "all", label: "🍽️ Anything Goes (All)", desc: "Show all delicious dishes" },
+                      { id: "veg_only", label: "🟢 Pure Vegetarian", desc: "Show green dot items only" },
+                      { id: "non_veg", label: "🍗 Non-Veg Lover", desc: "Chicken, Mutton, Fish" },
+                      { id: "vegan", label: "🌱 100% Plant Vegan", desc: "No dairy or animal items" }
+                    ].map((opt) => (
+                      <div
+                        key={opt.id}
+                        onClick={async () => {
+                          setProfileDietaryInput(opt.id);
+                          try {
+                            const updated = await api("/api/user/profile", {
+                              method: "PATCH",
+                              body: JSON.stringify({ dietaryPreference: opt.id })
+                            });
+                            setUser((prev) => ({ ...prev, ...updated }));
+                            setNotice(`Dietary preference set to ${opt.label}`);
+                          } catch (_) {}
+                        }}
+                        style={{
+                          padding: 10,
+                          borderRadius: 8,
+                          border: (user.dietaryPreference || "all") === opt.id ? "2px solid #ea580c" : "1px solid #e2e8f0",
+                          background: (user.dietaryPreference || "all") === opt.id ? "#fff7ed" : "#ffffff",
+                          cursor: "pointer"
+                        }}
+                      >
+                        <strong style={{ fontSize: 12, display: "block" }}>{opt.label}</strong>
+                        <small style={{ color: "#64748b", fontSize: 11 }}>{opt.desc}</small>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="profile-section-card">
+                  <h3 style={{ margin: "0 0 8px", fontSize: 13 }}>App Notifications & Push</h3>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <div>
+                      <strong style={{ fontSize: 13 }}>Live Order Status & Chimes</strong>
+                      <p className="muted" style={{ fontSize: 11, margin: "2px 0 0" }}>
+                        Receive instant sounds & web push alerts on status change
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      className="pill"
+                      onClick={requestPushSubscription}
+                      style={{ padding: "6px 14px", fontSize: 12, border: "1px solid #cbd5e1" }}
+                    >
+                      🔔 Check / Enable
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
           </section>
         </div>
       )}
+      {/* Chat Modal */}
+        {chatOrderCode && (
+          <div className="modal-backdrop" onMouseDown={() => setChatOrderCode(null)}>
+            <div className="modal" onMouseDown={e => e.stopPropagation()}>
+              <button className="close" onClick={() => setChatOrderCode(null)}>×</button>
+              <h3>Live Chat – Order {chatOrderCode}</h3>
+              <div className="chat-messages" style={{maxHeight: '300px', overflowY: 'auto', marginBottom: '12px'}}>
+                {chatMessages.map((msg, idx) => (
+                  <div key={idx} className={`chat-bubble ${msg.sender === 'me' ? 'outgoing' : 'incoming'}`}>
+                    <strong>{msg.sender}:</strong> {msg.message}
+                  </div>
+                ))}
+              </div>
+              <div style={{display: 'flex', gap: 8}}>
+                <input
+                  type="text"
+                  placeholder="Type a message…"
+                  value={chatInput}
+                  onChange={e => setChatInput(e.target.value)}
+                  onKeyDown={e => {if (e.key === 'Enter') sendChatMessage();}}
+                />
+                <button type="button" onClick={sendChatMessage}>Send</button>
+              </div>
+            </div>
+          </div>
+        )}
     </div>
   );
 }

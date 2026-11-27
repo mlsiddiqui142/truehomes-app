@@ -13,6 +13,11 @@ const userSchema = new mongoose.Schema(
       match: [/^[^\s@]+@[^\s@]+\.[^\s@]+$/, 'Please provide a valid email address']
     },
     phone: { type: String, trim: true, match: [/^[0-9+\s-]{10,15}$/, 'Please provide a valid phone number'] },
+    avatar: { type: String, default: '' },
+    bio: { type: String, trim: true, maxlength: 160, default: '' },
+    dietaryPreference: { type: String, enum: ['all', 'veg_only', 'non_veg', 'vegan'], default: 'all' },
+    dateOfBirth: { type: String, default: '' },
+    gender: { type: String, enum: ['prefer_not_to_say', 'female', 'male', 'other'], default: 'prefer_not_to_say' },
     addresses: [
       {
         label: { type: String, default: 'Home' },
