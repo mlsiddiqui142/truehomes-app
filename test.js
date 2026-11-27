@@ -59,7 +59,7 @@ describe('TrueHomes Full-Stack & Cyber-Security Automated Suite', () => {
     }
 
     serverProc = spawn(process.execPath, ['server.js'], {
-      env: { ...process.env, PORT: TEST_PORT, ADMIN_EMAIL: adminEmail },
+      env: { ...process.env, PORT: TEST_PORT, ADMIN_EMAIL: adminEmail, NODE_ENV: 'test' },
       stdio: 'ignore'
     });
 
@@ -76,9 +76,11 @@ describe('TrueHomes Full-Stack & Cyber-Security Automated Suite', () => {
     const cleanupUserIds = cleanupUsers.map((user) => user._id);
     if (cleanupUserIds.length) {
       await RefreshSession.deleteMany({ userId: { $in: cleanupUserIds } });
+      await WalletTransaction.deleteMany({ userId: { $in: cleanupUserIds } });
       await User.deleteMany({ _id: { $in: cleanupUserIds } });
     }
     if (createdRestaurantId) {
+      await Order.deleteMany({ restaurantId: createdRestaurantId });
       await Restaurant.findByIdAndDelete(createdRestaurantId);
     }
     if (createdOrderCode) {
@@ -91,9 +93,11 @@ describe('TrueHomes Full-Stack & Cyber-Security Automated Suite', () => {
     if (deliveryFixtureOrderCodes.length) {
       await Order.deleteMany({ orderCode: { $in: deliveryFixtureOrderCodes } });
     }
+    const cleanupOrderCodes = [createdOrderCode, liveStreamTestOrderCode].filter(Boolean);
+    if (cleanupOrderCodes.length) {
+      await Chat.deleteMany({ orderCode: { $in: cleanupOrderCodes } });
+    }
     await Coupon.deleteMany({ code: /^FESTIVE/ });
-    await Chat.deleteMany({});
-    await WalletTransaction.deleteMany({});
     await mongoose.disconnect();
   });
 
@@ -618,7 +622,8 @@ describe('TrueHomes Full-Stack & Cyber-Security Automated Suite', () => {
     const customerLocation = await fetch(`${BASE_URL}/api/orders/${createdOrderCode}`, {
       headers: { Authorization: `Bearer ${customerToken}` }
     });
-    assert.equal((await customerLocation.json()).deliveryLocation.longitude, 77.2094);
+    const customerOrderView = await customerLocation.json();
+    assert.equal(customerOrderView.deliveryLocation.longitude, 77.2094);
 
     const delRes = await fetch(`${BASE_URL}/api/delivery/orders/${createdOrderId}/status`, {
       method: 'PATCH',
@@ -626,7 +631,7 @@ describe('TrueHomes Full-Stack & Cyber-Security Automated Suite', () => {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${partnerToken}`
       },
-      body: JSON.stringify({ status: 'DELIVERED' })
+      body: JSON.stringify({ status: 'DELIVERED', otp: customerOrderView.deliveryOtp })
     });
     const delData = await delRes.json();
     assert.equal(delRes.status, 200);
@@ -754,7 +759,7 @@ describe('TrueHomes Full-Stack & Cyber-Security Automated Suite', () => {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${partnerTokens[index]}`
         },
-        body: JSON.stringify({ status: 'DELIVERED' })
+        body: JSON.stringify({ status: 'DELIVERED', otp: fixtureOrders[index].deliveryOtp })
       });
       assert.equal(delivered.status, 200);
       assert.equal((await delivered.json()).deliveryLocation, undefined);
@@ -1050,6 +1055,61 @@ describe('TrueHomes Full-Stack & Cyber-Security Automated Suite', () => {
     });
     assert.equal(doubleCancel.status, 409);
 
+    // 3b. Cancelling a paid (simulator) order marks it REFUNDED
+    const paidOrderRes = await fetch(`${BASE_URL}/api/orders`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${customerToken}`,
+        'X-Forwarded-For': '198.51.100.23'
+      },
+      body: JSON.stringify({
+        restaurantId: createdRestaurantId,
+        items: [{ menuItemId: createdMenuItemId, qty: 1 }],
+        paymentMethod: 'RAZORPAY',
+        customerName: 'Rohit Sharma',
+        customerPhone: '9988776655',
+        deliveryAddress: 'Test Refund St'
+      })
+    });
+    assert.equal(paidOrderRes.status, 201);
+    const paidOrder = await paidOrderRes.json();
+    const initRes = await fetch(`${BASE_URL}/api/payments/razorpay/order`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${customerToken}`,
+        'X-Forwarded-For': '198.51.100.24'
+      },
+      body: JSON.stringify({ orderId: paidOrder._id, orderCode: paidOrder.orderCode })
+    });
+    assert.equal(initRes.status, 200);
+    const initData = await initRes.json();
+    if (initData.mode === 'simulator') {
+      const verifyRes = await fetch(`${BASE_URL}/api/payments/razorpay/verify`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${customerToken}`,
+          'X-Forwarded-For': '198.51.100.25'
+        },
+        body: JSON.stringify({ orderId: paidOrder._id, orderCode: paidOrder.orderCode, simulated: true })
+      });
+      assert.equal(verifyRes.status, 200);
+      const paidCancelRes = await fetch(`${BASE_URL}/api/orders/${paidOrder.orderCode}/cancel`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${customerToken}`
+        },
+        body: JSON.stringify({ reason: 'Paid order refund check' })
+      });
+      assert.equal(paidCancelRes.status, 200);
+      const paidCancelData = await paidCancelRes.json();
+      assert.equal(paidCancelData.order.paymentStatus, 'REFUNDED');
+      assert.equal(paidCancelData.gatewayRefund, 'refunded');
+    }
+
     // 4. Place another order to test delivery OTP verification
     const orderForOtpRes = await fetch(`${BASE_URL}/api/orders`, {
       method: 'POST',
@@ -1182,6 +1242,54 @@ describe('TrueHomes Full-Stack & Cyber-Security Automated Suite', () => {
     assert.equal(dishToggleRes.status, 200);
     const toggledDish = await dishToggleRes.json();
     assert.equal(toggledDish.isAvailable, false);
+
+    // 5b. Out-of-stock dishes cannot be ordered
+    const outOfStockRes = await fetch(`${BASE_URL}/api/orders`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${customerToken}`, 'X-Forwarded-For': '198.51.100.43' },
+      body: JSON.stringify({
+        restaurantId: createdRestaurantId,
+        items: [{ menuItemId: createdMenuItemId, qty: 1 }],
+        paymentMethod: 'COD',
+        customerName: 'Rohit Sharma',
+        customerPhone: '9988776655',
+        deliveryAddress: 'Test Stock St'
+      })
+    });
+    assert.equal(outOfStockRes.status, 409);
+
+    // 5c. Closed kitchens reject orders
+    await fetch(`${BASE_URL}/api/kitchen/my/toggle`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${kitchenToken}`, 'X-Forwarded-For': testIp },
+      body: JSON.stringify({ isOpen: false })
+    });
+    const closedKitchenRes = await fetch(`${BASE_URL}/api/orders`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${customerToken}`, 'X-Forwarded-For': '198.51.100.44' },
+      body: JSON.stringify({
+        restaurantId: createdRestaurantId,
+        items: [{ menuItemId: createdMenuItemId, qty: 1 }],
+        paymentMethod: 'COD',
+        customerName: 'Rohit Sharma',
+        customerPhone: '9988776655',
+        deliveryAddress: 'Test Closed St'
+      })
+    });
+    assert.equal(closedKitchenRes.status, 409);
+
+    // 5d. Restore kitchen and dish state for the remaining tests
+    await fetch(`${BASE_URL}/api/kitchen/my/toggle`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${kitchenToken}`, 'X-Forwarded-For': testIp },
+      body: JSON.stringify({ isOpen: true })
+    });
+    const restoreDishRes = await fetch(`${BASE_URL}/api/kitchen/my/menu/${createdMenuItemId}/toggle`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${kitchenToken}`, 'X-Forwarded-For': testIp },
+      body: JSON.stringify({ isAvailable: true })
+    });
+    assert.equal(restoreDishRes.status, 200);
 
     // 6. Kitchen owner views incoming orders
     const kitchenOrdersRes = await fetch(`${BASE_URL}/api/kitchen/my/orders`, {

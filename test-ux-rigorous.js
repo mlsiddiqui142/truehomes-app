@@ -42,7 +42,9 @@ let customerToken  = '';
 let adminToken     = '';
 let riderToken     = '';
 let kitchenToken   = '';
+let kitchenId      = '';
 let restaurantId   = '';
+let createdSuiteRestaurantId = '';
 let dishId         = '';
 let orderId        = '';
 let orderCode      = '';
@@ -101,7 +103,7 @@ async function runTests() {
   } catch (_) {
     spawnedHere = true;
     serverProc = spawn(process.execPath, ['server.js'], {
-      env: { ...process.env, PORT, ADMIN_EMAIL: emails.admin },
+      env: { ...process.env, PORT, ADMIN_EMAIL: emails.admin, NODE_ENV: 'test' },
       stdio: 'ignore',
       cwd: __dirname,
     });
@@ -160,6 +162,7 @@ async function runTests() {
     const attempts = Array.from({ length: 7 }, () =>
       req('/api/auth/login', {
         method: 'POST',
+        headers: { 'X-Forwarded-For': '203.0.113.250' },
         body: JSON.stringify({ email: 'rate@test.com', password: 'wrong' }),
       })
     );
@@ -337,7 +340,7 @@ async function runTests() {
   });
 
   await test('2.18 Customer: Cannot access admin endpoints (403)', async () => {
-    const { res } = await req('/api/admin/restaurants', { method: 'GET' }, customerToken);
+    const { res } = await req('/api/admin/orders', { method: 'GET' }, customerToken);
     assert.ok([403, 401].includes(res.status), 'Customer should be blocked from admin endpoints');
   });
 
@@ -421,6 +424,7 @@ async function runTests() {
     }, adminToken);
     assert.ok([200, 201].includes(res.status), `Create restaurant failed: ${JSON.stringify(body)}`);
     assert.ok(body._id || body.restaurant?._id, 'Restaurant ID missing from response');
+    createdSuiteRestaurantId = body._id || body.restaurant?._id;
   });
 
   await test('3.4  Admin: Add a dish to existing restaurant', async () => {
@@ -592,15 +596,25 @@ async function runTests() {
   });
 
   await test('4.10 Rider: Mark order as DELIVERED', async () => {
-    const { res, body } = await req(`/api/delivery/orders/${orderId}/status`, {
+    const noOtp = await req(`/api/delivery/orders/${orderId}/status`, {
       method: 'PATCH',
       body: JSON.stringify({ status: 'DELIVERED' }),
+    }, riderToken);
+    assert.ok([400, 409].includes(noOtp.res.status), 'Delivery without OTP must be rejected');
+
+    const { body: riderOrders } = await req('/api/delivery/orders', {}, riderToken);
+    const target = Array.isArray(riderOrders)
+      ? riderOrders.find((o) => String(o._id) === String(orderId))
+      : null;
+    const { res, body } = await req(`/api/delivery/orders/${orderId}/status`, {
+      method: 'PATCH',
+      body: JSON.stringify({ status: 'DELIVERED', otp: target?.deliveryOtp }),
     }, riderToken);
     assert.ok([200, 201].includes(res.status), `DELIVERED update failed: ${JSON.stringify(body)}`);
   });
 
   await test('4.11 Rider: Cannot access admin dashboard (403)', async () => {
-    const { res } = await req('/api/admin/restaurants', {}, riderToken);
+    const { res } = await req('/api/admin/orders', {}, riderToken);
     assert.ok([401, 403].includes(res.status), 'Rider must not access admin');
   });
 
@@ -634,6 +648,16 @@ async function runTests() {
     });
     assert.ok([201, 202].includes(res.status), `Kitchen register failed: ${JSON.stringify(body)}`);
     kitchenToken = body.token;
+    kitchenId = body.user?.id;
+  });
+
+  await test('5.1b Kitchen: Admin assigns a restaurant to the kitchen owner', async () => {
+    if (!adminToken || !restaurantId || !kitchenId) { assert.fail('Missing admin/restaurant/kitchen fixture'); return; }
+    const { res, body } = await req(`/api/admin/kitchens/${restaurantId}/assign-owner`, {
+      method: 'POST',
+      body: JSON.stringify({ ownerId: kitchenId }),
+    }, adminToken);
+    assert.equal(res.status, 200, `Assign failed: ${JSON.stringify(body)}`);
   });
 
   await test('5.2  Kitchen: GET /api/kitchen/my endpoint reachable', async () => {
@@ -650,14 +674,30 @@ async function runTests() {
 
   await test('5.4  Kitchen: Toggle kitchen open/closed', async () => {
     if (!kitchenToken) { assert.fail('kitchenToken not set'); return; }
-    const { res, body } = await req('/api/kitchen/my/toggle', { method: 'PATCH' }, kitchenToken);
-    assert.ok([200, 404].includes(res.status), `Toggle failed: ${JSON.stringify(body)}`);
+    const closed = await req('/api/kitchen/my/toggle', {
+      method: 'PATCH',
+      body: JSON.stringify({ isOpen: false }),
+    }, kitchenToken);
+    assert.equal(closed.res.status, 200, `Close failed: ${JSON.stringify(closed.body)}`);
+    const reopened = await req('/api/kitchen/my/toggle', {
+      method: 'PATCH',
+      body: JSON.stringify({ isOpen: true }),
+    }, kitchenToken);
+    assert.equal(reopened.res.status, 200, `Reopen failed: ${JSON.stringify(reopened.body)}`);
   });
 
   await test('5.5  Kitchen: Toggle dish stock', async () => {
     if (!kitchenToken) { assert.fail('kitchenToken not set'); return; }
-    const { res } = await req(`/api/kitchen/my/menu/${dishId}/toggle`, { method: 'PATCH' }, kitchenToken);
-    assert.ok([200, 403, 404].includes(res.status), 'Dish toggle unexpected status');
+    const off = await req(`/api/kitchen/my/menu/${dishId}/toggle`, {
+      method: 'PATCH',
+      body: JSON.stringify({ isAvailable: false }),
+    }, kitchenToken);
+    assert.equal(off.res.status, 200, 'Dish stock toggle unexpected status');
+    const on = await req(`/api/kitchen/my/menu/${dishId}/toggle`, {
+      method: 'PATCH',
+      body: JSON.stringify({ isAvailable: true }),
+    }, kitchenToken);
+    assert.equal(on.res.status, 200, 'Dish stock restore failed');
   });
 
   await test('5.6  Kitchen: React source contains kitchen portal states', async () => {
@@ -674,11 +714,10 @@ async function runTests() {
     assert.ok(src.includes('kitchenTab'), 'Kitchen tab state missing');
   });
 
-  await test('5.8  Kitchen: KitchenPortal component has aria attributes', async () => {
-    const src = fs.readFileSync(path.join(__dirname, 'src/react/components/KitchenPortal.jsx'), 'utf8');
-    assert.ok(src.includes('aria-modal'), 'aria-modal missing from KitchenPortal');
-    assert.ok(src.includes('role="dialog"'), 'role=dialog missing from KitchenPortal');
-    assert.ok(src.includes('aria-label'), 'aria-label missing from KitchenPortal');
+  await test('5.8  Kitchen: portal is role-gated to kitchen_owner in shipped frontend', async () => {
+    const src = fs.readFileSync(path.join(__dirname, 'src/react/main.jsx'), 'utf8');
+    assert.ok(src.includes('role === "kitchen_owner"'), 'kitchen_owner role gating missing');
+    assert.ok(src.includes('setKitchenOpen(true)'), 'Kitchen portal is never opened for owners');
   });
 
   await test('5.9  Kitchen: Chat modal reachable from order context', async () => {
@@ -692,63 +731,80 @@ async function runTests() {
   // ════════════════════════════════════════════════════════════
   console.log('\n═══ Phase 6: UI/UX Component Structure & Accessibility ═══\n');
 
-  await test('6.1  New component files exist', async () => {
-    const components = ['TopBar.jsx', 'RestaurantList.jsx', 'ChatModal.jsx', 'KitchenPortal.jsx', 'Toast.jsx', 'Header.jsx'];
-    for (const f of components) {
-      const p = path.join(__dirname, 'src/react/components', f);
-      assert.ok(fs.existsSync(p), `Component missing: ${f}`);
+  await test('6.1  Single React frontend source is present (legacy + modular paths removed)', async () => {
+    const required = [
+      'src/react/main.jsx',
+      'src/react/styles.css',
+      'index.react.html',
+      'vite.config.mjs',
+      'public/react/index.react.html'
+    ];
+    for (const f of required) {
+      assert.ok(fs.existsSync(path.join(__dirname, f)), `Missing frontend file: ${f}`);
+    }
+    const removed = [
+      'src/react/App.jsx',
+      'src/react/components',
+      'src/react/context',
+      'src/react/__tests__',
+      'public/index.html',
+      'public/js',
+      'public/css',
+      'public/sw.js'
+    ];
+    for (const gone of removed) {
+      assert.ok(!fs.existsSync(path.join(__dirname, gone)), `Retired frontend path still present: ${gone}`);
     }
   });
 
-  await test('6.2  AppContext exists and exports useAppContext', async () => {
-    const src = fs.readFileSync(path.join(__dirname, 'src/react/context/AppContext.jsx'), 'utf8');
-    assert.ok(src.includes('export function useAppContext'), 'useAppContext not exported');
-    assert.ok(src.includes('export function AppProvider'), 'AppProvider not exported');
+  await test('6.2  Vite builds the single React entry into public/react', async () => {
+    const src = fs.readFileSync(path.join(__dirname, 'vite.config.mjs'), 'utf8');
+    assert.ok(src.includes('input: "index.react.html"'), 'Vite entry is not index.react.html');
+    assert.ok(src.includes('outDir: "public/react"'), 'Vite output dir is not public/react');
   });
 
-  await test('6.3  TopBar has aria-label on all interactive elements', async () => {
-    const src = fs.readFileSync(path.join(__dirname, 'src/react/components/TopBar.jsx'), 'utf8');
-    assert.ok(src.includes('aria-label'), 'TopBar missing aria-label attributes');
-    assert.ok(src.includes('role="banner"'), 'TopBar missing role=banner');
-    assert.ok(src.includes('aria-expanded'), 'TopBar missing aria-expanded on account menu');
+  await test('6.3  Entry registers the service worker for PWA push', async () => {
+    const src = fs.readFileSync(path.join(__dirname, 'src/react/main.jsx'), 'utf8');
+    assert.ok(src.includes('navigator.serviceWorker.register("/service-worker.js")'), 'service worker registration missing from entry');
+    assert.ok(src.includes('PushManager'), 'push subscription support missing from entry');
   });
 
-  await test('6.4  ChatModal has role=dialog and aria-modal', async () => {
-    const src = fs.readFileSync(path.join(__dirname, 'src/react/components/ChatModal.jsx'), 'utf8');
-    assert.ok(src.includes('role="dialog"'), 'role=dialog missing');
-    assert.ok(src.includes('aria-modal="true"'), 'aria-modal missing');
-    assert.ok(src.includes('aria-live'), 'aria-live missing from chat messages');
+  await test('6.4  Chat UI wired to order-scoped SSE stream in shipped frontend', async () => {
+    const src = fs.readFileSync(path.join(__dirname, 'src/react/main.jsx'), 'utf8');
+    assert.ok(src.includes('chatOrderCode'), 'chatOrderCode state missing');
+    assert.ok(src.includes('Live Chat'), 'chat modal markup missing');
+    assert.ok(src.includes('/chat/stream'), 'chat stream endpoint not referenced');
   });
 
-  await test('6.5  RestaurantList has proper ARIA roles for list and filter buttons', async () => {
-    const src = fs.readFileSync(path.join(__dirname, 'src/react/components/RestaurantList.jsx'), 'utf8');
-    assert.ok(src.includes('role="list"'), 'role=list missing');
-    assert.ok(src.includes('aria-pressed'), 'aria-pressed missing from filter buttons');
-    assert.ok(src.includes('aria-label'), 'aria-label missing');
+  await test('6.5  Restaurant grid and search controls rendered in shipped frontend', async () => {
+    const src = fs.readFileSync(path.join(__dirname, 'src/react/main.jsx'), 'utf8');
+    assert.ok(src.includes('restaurants.map'), 'restaurant grid rendering missing');
+    assert.ok(src.includes('setSearch'), 'search control missing');
   });
 
-  await test('6.6  Toast component has role=status and aria-live', async () => {
-    const src = fs.readFileSync(path.join(__dirname, 'src/react/components/Toast.jsx'), 'utf8');
-    assert.ok(src.includes('role="status"'), 'role=status missing from Toast');
-    assert.ok(src.includes('aria-live'), 'aria-live missing from Toast');
+  await test('6.6  User-facing notifications use the notice system', async () => {
+    const src = fs.readFileSync(path.join(__dirname, 'src/react/main.jsx'), 'utf8');
+    assert.ok(src.includes('setNotice'), 'notice/toast helper missing');
   });
 
-  await test('6.7  App.jsx uses React.lazy for heavy modals', async () => {
-    const src = fs.readFileSync(path.join(__dirname, 'src/react/App.jsx'), 'utf8');
-    assert.ok(src.includes('lazy('), 'React.lazy not used');
-    assert.ok(src.includes('Suspense'), 'Suspense not used');
+  await test('6.7  Razorpay checkout script and client are wired', async () => {
+    const html = fs.readFileSync(path.join(__dirname, 'index.react.html'), 'utf8');
+    assert.ok(html.includes('checkout.razorpay.com'), 'Razorpay script missing from shell');
+    const src = fs.readFileSync(path.join(__dirname, 'src/react/main.jsx'), 'utf8');
+    assert.ok(src.includes('window.Razorpay'), 'Razorpay client not used in entry');
   });
 
-  await test('6.8  Ctrl+K keyboard shortcut for kitchen portal in App.jsx', async () => {
-    const src = fs.readFileSync(path.join(__dirname, 'src/react/App.jsx'), 'utf8');
-    assert.ok(src.includes("key === \"k\"") || src.includes("key==='k'") || src.includes('Ctrl+K'), 'Ctrl+K shortcut missing');
+  await test('6.8  Retired legacy route and fallbacks are gone from server', async () => {
+    const src = fs.readFileSync(path.join(__dirname, 'server.js'), 'utf8');
+    assert.ok(!src.includes("app.get('/legacy'"), '/legacy route still served');
+    assert.ok(!src.includes("'public', 'index.html'"), 'public/index.html fallback still referenced');
   });
 
-  await test('6.9  Escape key closes modals in ChatModal and KitchenPortal', async () => {
-    const chatSrc = fs.readFileSync(path.join(__dirname, 'src/react/components/ChatModal.jsx'), 'utf8');
-    const kitchenSrc = fs.readFileSync(path.join(__dirname, 'src/react/components/KitchenPortal.jsx'), 'utf8');
-    assert.ok(chatSrc.includes('Escape') || chatSrc.includes('escape'), 'Escape key not handled in ChatModal');
-    assert.ok(kitchenSrc.includes('Escape') || kitchenSrc.includes('escape'), 'Escape key not handled in KitchenPortal');
+  await test('6.9  Legacy static assets are no longer served', async () => {
+    const res = await fetch(`${BASE_URL}/js/app.js`);
+    const body = await res.text();
+    assert.ok(!body.includes('TrueHomesAPI'), 'Legacy JS bundle is still served');
+    assert.ok(body.includes('<div id="root">'), 'Unknown path did not fall back to SPA shell');
   });
 
   await test('6.10 CI/CD workflow file exists and contains MongoDB service', async () => {
@@ -760,25 +816,20 @@ async function runTests() {
     assert.ok(src.includes('npm run test:ui'), 'UI test step missing from CI');
   });
 
-  await test('6.11 README.md has New Features section and component hierarchy', async () => {
+  await test('6.11 README describes the single frontend, scripts, and testing', async () => {
     const p = path.join(__dirname, 'README.md');
     assert.ok(fs.existsSync(p), 'README.md missing');
     const src = fs.readFileSync(p, 'utf8');
-    assert.ok(src.includes('New Features'), 'New Features section missing');
-    assert.ok(src.includes('Component Hierarchy') || src.includes('component hierarchy'), 'Component hierarchy missing');
     assert.ok(src.includes('Quick Start'), 'Quick Start section missing');
+    assert.ok(src.includes('Architecture'), 'Architecture section missing');
+    assert.ok(src.includes('Single frontend'), 'README does not document the single-frontend layout');
+    assert.ok(src.includes('Testing'), 'Testing section missing');
     assert.ok(src.includes('CI/CD'), 'CI/CD docs missing');
   });
 
   await test('6.12 No console.log in React source files', async () => {
     const files = [
       'src/react/main.jsx',
-      'src/react/App.jsx',
-      'src/react/components/TopBar.jsx',
-      'src/react/components/RestaurantList.jsx',
-      'src/react/components/ChatModal.jsx',
-      'src/react/components/KitchenPortal.jsx',
-      'src/react/components/Toast.jsx',
     ];
     for (const f of files) {
       const fp = path.join(__dirname, f);
@@ -869,8 +920,11 @@ async function runTests() {
     const mongoose = require('mongoose');
     const User             = require('./models/User');
     const Order            = require('./models/Order');
+    const Restaurant       = require('./models/Restaurant');
     const RefreshSession   = require('./models/RefreshSession');
     const Coupon           = require('./models/Coupon');
+    const Chat             = require('./models/Chat');
+    const WalletTransaction = require('./models/WalletTransaction');
 
     await mongoose.connect(process.env.MONGO_URI);
     const testEmails = Object.values(emails).filter(Boolean);
@@ -878,9 +932,12 @@ async function runTests() {
     const userIds = users.map((u) => u._id);
     if (userIds.length) {
       await RefreshSession.deleteMany({ userId: { $in: userIds } });
+      await WalletTransaction.deleteMany({ userId: { $in: userIds } });
       await User.deleteMany({ _id: { $in: userIds } });
     }
+    if (orderCode) await Chat.deleteMany({ orderCode });
     if (orderCode) await Order.deleteOne({ orderCode });
+    if (createdSuiteRestaurantId) await Restaurant.findByIdAndDelete(createdSuiteRestaurantId);
     await Coupon.deleteMany({ code: { $regex: `RIG|DUP` } });
     await mongoose.disconnect();
   });

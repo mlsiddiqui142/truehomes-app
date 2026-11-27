@@ -1,7 +1,5 @@
 require('dotenv').config();
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
 const { spawn } = require('node:child_process');
 
 const PORT = process.env.UI_TEST_PORT || '5066';
@@ -32,7 +30,7 @@ async function runInterfaceTests() {
   } catch (_) {
     spawnedHere = true;
     serverProc = spawn(process.execPath, ['server.js'], {
-      env: { ...process.env, PORT },
+      env: { ...process.env, PORT, NODE_ENV: 'test' },
       stdio: 'ignore'
     });
     await waitForServer();
@@ -55,7 +53,7 @@ async function runInterfaceTests() {
 
   // 1. PWA & Shell Interface
   console.log('📌 Phase 1: Static Shell & PWA Assets Interface');
-  await test('1.1 Root URL serves complete HTML document with valid structure', async () => {
+  await test('1.1 Root URL serves the React SPA shell', async () => {
     const res = await fetch(`${BASE_URL}/`);
     assert.equal(res.status, 200);
     const html = await res.text();
@@ -63,8 +61,8 @@ async function runInterfaceTests() {
     assert.ok(html.includes('<title>TrueHomes'));
     assert.ok(html.includes('cdn.tailwindcss.com'));
     assert.ok(html.includes('checkout.razorpay.com'));
-    const cssRes = await fetch(`${BASE_URL}/css/app.css`);
-    assert.ok((await cssRes.text()).includes('Plus Jakarta Sans'));
+    assert.ok(html.includes('<div id="root">'));
+    assert.ok(/\/react\/assets\/[^"]+\.js/.test(html), 'JS bundle reference missing from shell');
   });
 
   await test('1.2 PWA Web App Manifest is valid and reachable', async () => {
@@ -86,99 +84,39 @@ async function runInterfaceTests() {
     assert.ok(sw.includes('url.pathname.startsWith("/api/")'));
   });
 
-  await test('1.4 Modular frontend assets are accessible', async () => {
-    const cssRes = await fetch(`${BASE_URL}/css/app.css`);
+  await test('1.4 Built JS bundle and stylesheet are reachable and ship the service worker registration', async () => {
+    const html = await (await fetch(`${BASE_URL}/`)).text();
+    const assetUrls = [...html.matchAll(/(?:src|href)="(\/react\/assets\/[^"]+)"/g)].map((m) => m[1]);
+    const jsUrl = assetUrls.find((url) => url.endsWith('.js'));
+    const cssUrl = assetUrls.find((url) => url.endsWith('.css'));
+    assert.ok(jsUrl, 'No JS bundle referenced in shell');
+    assert.ok(cssUrl, 'No CSS bundle referenced in shell');
+
+    const jsRes = await fetch(`${BASE_URL}${jsUrl}`);
+    assert.equal(jsRes.status, 200);
+    const bundle = await jsRes.text();
+    assert.ok(bundle.length > 1000, 'JS bundle appears empty');
+    assert.ok(bundle.includes('serviceWorker'), 'Bundle does not register a service worker');
+
+    const cssRes = await fetch(`${BASE_URL}${cssUrl}`);
     assert.equal(cssRes.status, 200);
-    assert.ok((await cssRes.text()).includes('scooter-bounce'));
-
-    const appRes = await fetch(`${BASE_URL}/js/app.js`);
-    assert.equal(appRes.status, 200);
-    assert.ok((await appRes.text()).includes('function escapeHTML'));
-
-    const apiRes = await fetch(`${BASE_URL}/js/api-client.js`);
-    assert.equal(apiRes.status, 200);
-    assert.ok((await apiRes.text()).includes('TrueHomesAPI'));
-
-    const stateRes = await fetch(`${BASE_URL}/js/app-state.js`);
-    assert.equal(stateRes.status, 200);
-    assert.ok((await stateRes.text()).includes('TrueHomesState'));
-
-    const authRes = await fetch(`${BASE_URL}/js/auth-service.js`);
-    assert.equal(authRes.status, 200);
-    assert.ok((await authRes.text()).includes('TrueHomesAuth'));
-
-    const featureAssets = [
-      ['restaurant-service.js', 'TrueHomesRestaurants'],
-      ['cart-service.js', 'TrueHomesCart'],
-      ['order-service.js', 'TrueHomesOrders'],
-      ['delivery-service.js', 'TrueHomesDelivery'],
-      ['admin-service.js', 'TrueHomesAdmin']
-    ];
-    for (const [fileName, marker] of featureAssets) {
-      const res = await fetch(`${BASE_URL}/js/${fileName}`);
-      assert.equal(res.status, 200);
-      assert.ok((await res.text()).includes(marker));
-    }
+    assert.ok((await cssRes.text()).length > 1000, 'CSS bundle appears empty');
   });
 
-  // 2. DOM Components & Controls
-  console.log('\n📌 Phase 2: Navigation & Component Interface Verification');
-  const indexHtml = fs.readFileSync(path.join(__dirname, 'public', 'index.html'), 'utf8');
-  const appJs = fs.readFileSync(path.join(__dirname, 'public', 'js', 'app.js'), 'utf8');
-
-  await test('2.1 Top Navigation Bar contains all action controls', async () => {
-    assert.ok(indexHtml.includes('id="locationSelect"'), 'Missing Location Selector');
-    assert.ok(indexHtml.includes('onclick="openTrackModal()"'), 'Missing Live Track button');
-    assert.ok(indexHtml.includes('id="adminNavBtn"'), 'Missing Admin Panel navigation button');
-    assert.ok(indexHtml.includes('id="deliveryNavBtn"'), 'Missing Rider Portal navigation button');
-    assert.ok(indexHtml.includes('id="authNavBtn"'), 'Missing Sign In navigation button');
-    assert.ok(indexHtml.includes('id="cartCountBadge"'), 'Missing Cart count badge');
+  // 2. SPA Routing
+  console.log('\n📌 Phase 2: SPA Routing Interface');
+  await test('2.1 Unknown client route falls back to the SPA shell', async () => {
+    const res = await fetch(`${BASE_URL}/restaurants/some-deep-link`);
+    assert.equal(res.status, 200);
+    const html = await res.text();
+    assert.ok(html.includes('<div id="root">'), 'SPA fallback did not return the app shell');
   });
 
-  await test('2.2 All 7 Primary UI Modals exist with valid IDs', async () => {
-    const expectedModals = [
-      'authModal',
-      'menuModal',
-      'cartDrawer',
-      'trackModal',
-      'deliveryModal',
-      'adminModal',
-      'rzpSimModal'
-    ];
-    for (const modalId of expectedModals) {
-      assert.ok(
-        indexHtml.includes(`id="${modalId}"`),
-        `Modal container #${modalId} is missing from HTML`
-      );
-    }
-  });
-
-  await test('2.3 Auth Modal contains 3-Role selector & Direct Login controls', async () => {
-    assert.ok(appJs.includes('id="thRoleTab_admin"'), 'Missing Admin role tab');
-    assert.ok(appJs.includes('id="thRoleTab_user"'), 'Missing User role tab');
-    assert.ok(appJs.includes('id="thRoleTab_delivery_partner"'), 'Missing Delivery Partner role tab');
-    assert.ok(appJs.includes('id="thDirectLoginBox"'), 'Missing Direct Login box');
-    assert.ok(appJs.includes('id="thDirectLoginBtn"'), 'Missing Direct Login button');
-    assert.ok(appJs.includes('performDirectDatabaseLogin'), 'Missing Direct Login handler');
-  });
-
-  await test('2.4 Rider Portal (Delivery Modal) contains metrics bar & action handlers', async () => {
-    assert.ok(indexHtml.includes('id="deliveryActiveCount"'), 'Missing Active Deliveries metric');
-    assert.ok(indexHtml.includes('id="deliveryCompletedCount"'), 'Missing Completed Deliveries metric');
-    assert.ok(indexHtml.includes('id="deliveryTipsEarned"'), 'Missing Tips Earned metric');
-    assert.ok(indexHtml.includes('id="deliveryOrdersList"'), 'Missing orders list container');
-    assert.ok(appJs.includes('claimDeliveryOrder'), 'Missing claimDeliveryOrder function');
-    assert.ok(appJs.includes('updateDeliveryStatus'), 'Missing updateDeliveryStatus function');
-  });
-
-  await test('2.5 Live Order Tracker contains timeline & real-time SSE stream indicator', async () => {
-    assert.ok(indexHtml.includes('id="trackCodeInput"'), 'Missing order code input');
-    assert.ok(indexHtml.includes('id="trackDetailsBox"'), 'Missing track details container');
-    assert.ok(appJs.includes('connectTrackLiveStream'), 'Missing connectTrackLiveStream function');
-    assert.ok(appJs.includes('disconnectTrackLiveStream'), 'Missing disconnectTrackLiveStream function');
-    assert.ok(appJs.includes('AbortController'), 'Missing authenticated stream cancellation integration');
-    assert.ok(appJs.includes('Authorization'), 'Missing bearer authorization integration');
-    assert.ok(appJs.includes('Live Stream'), 'Missing Live Stream indicator');
+  await test('2.2 Retired legacy entry point is gone', async () => {
+    const res = await fetch(`${BASE_URL}/legacy`);
+    const html = await res.text();
+    assert.ok(!html.includes('id="authModal"'), 'Legacy vanilla UI should no longer be served');
+    assert.ok(html.includes('<div id="root">'), 'Retired route should fall back to the SPA shell');
   });
 
   // 3. Client Calculation Engine
@@ -225,6 +163,7 @@ async function runInterfaceTests() {
   let adminToken = '';
   let createdOrderId = '';
   let createdOrderCode = '';
+  let createdOrderOtp = '';
   const testRun = Date.now();
   const uiCustomerEmail = `ui_cust_${testRun}@truehomes.test`;
   const uiRiderEmail = `ui_rider_${testRun}@truehomes.test`;
@@ -288,6 +227,7 @@ async function runInterfaceTests() {
     assert.equal(order.status, 'CONFIRMED');
     createdOrderId = order._id;
     createdOrderCode = order.orderCode;
+    createdOrderOtp = order.deliveryOtp;
   });
 
   await test('4.4 Delivery Partner Interface: Provision rider account and access dashboard', async () => {
@@ -397,7 +337,7 @@ async function runInterfaceTests() {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${riderToken}`
       },
-      body: JSON.stringify({ status: 'DELIVERED' })
+      body: JSON.stringify({ status: 'DELIVERED', otp: createdOrderOtp })
     });
 
     // Stream receives DELIVERED broadcast
@@ -411,15 +351,7 @@ async function runInterfaceTests() {
   // ─── Phase 5: Reviews Engine Interface ────────────────────────────────────
   console.log('\n📌 Phase 5: Customer Ratings & Reviews Engine Interface');
 
-  await test('5.1 Review modal HTML is present in page (id="reviewModal")', async () => {
-    assert.ok(indexHtml.includes('id="reviewModal"'), 'reviewModal element missing from legacy HTML');
-    assert.ok(indexHtml.includes('foodStars'), 'foodStars star picker missing');
-    assert.ok(indexHtml.includes('deliveryStars'), 'deliveryStars star picker missing');
-    assert.ok(indexHtml.includes('reviewComment'), 'reviewComment textarea missing');
-    assert.ok(indexHtml.includes('submitReview'), 'submitReview function call missing');
-  });
-
-  await test('5.2 Review API: POST review for a DELIVERED order returns 201', async () => {
+  await test('5.1 Review API: POST review for a DELIVERED order returns 201', async () => {
     // Register a fresh customer
     const runId = Date.now();
     const email = `uirev_${runId}@truehomes.test`;
@@ -499,7 +431,7 @@ async function runInterfaceTests() {
     }
   });
 
-  await test('5.3 GET /api/restaurants/:id/reviews returns JSON array', async () => {
+  await test('5.2 GET /api/restaurants/:id/reviews returns JSON array', async () => {
     const restArr = await (await fetch(`${BASE_URL}/api/restaurants`)).json();
     const rest = restArr[0];
     assert.ok(rest && rest._id, 'No restaurants found');
@@ -510,19 +442,7 @@ async function runInterfaceTests() {
     assert.ok(Array.isArray(reviews), 'reviews must be a JSON array');
   });
 
-  await test('5.4 Review modal JS functions are present in page (openReviewModal, setReviewStar, submitReview)', async () => {
-    assert.ok(appJs.includes('function openReviewModal'), 'openReviewModal function missing');
-    assert.ok(appJs.includes('function setReviewStar'), 'setReviewStar function missing');
-    assert.ok(appJs.includes('async function submitReview'), 'submitReview async function missing');
-    assert.ok(appJs.includes('renderStars'), 'renderStars helper missing');
-  });
-
-  await test('5.5 Restaurant cards show reviewCount badge when reviews exist', async () => {
-    // The template should contain the reviewCount conditional expression
-    assert.ok(appJs.includes('reviewCount'), 'reviewCount field not referenced in app JS');
-  });
-
-  await test('5.6 Remove temporary UI test accounts, orders, and sessions', async () => {
+  await test('5.3 Remove temporary UI test accounts, orders, and sessions', async () => {
     const mongoose = require('mongoose');
     const User = require('./models/User');
     const Order = require('./models/Order');

@@ -1,6 +1,6 @@
 # TrueHomes — Homestyle & Top Rated Food Delivery
 
-A full-stack food delivery platform built with **React 19** (Vite), **Node.js / Express 4**, and **MongoDB** (Mongoose). Features real-time order tracking via Server-Sent Events, PWA offline support, in-app chat, and a comprehensive role-based UI.
+A full-stack food delivery platform built with **React 19** (Vite), **Node.js / Express 4**, and **MongoDB** (Mongoose). One React SPA for customers, kitchen owners, delivery partners, and admins, backed by a single Express API with JWT auth, real-time order tracking (SSE), in-app chat, wallet/cashback, coupons, and PWA offline + push support.
 
 ---
 
@@ -8,19 +8,31 @@ A full-stack food delivery platform built with **React 19** (Vite), **Node.js / 
 
 ```bash
 # 1. Install dependencies
-cd truehomes-app
 npm install
 
-# 2. Set up environment variables (copy .env.example → .env and fill in values)
-cp .env.example .env
+# 2. Create a .env file (see "Environment Variables" below)
 
-# 3. Seed database with sample restaurants & users
+# 3. Seed the database with sample restaurants & users
 npm run seed
 
-# 4. Start development server (Vite + Express)
-npm run dev        # frontend on http://localhost:5173
-node server.js     # backend API on http://localhost:3000 (or PORT in .env)
+# 4. Build the frontend and start the server
+npm run build      # bundles src/react/main.jsx → public/react/
+npm start          # http://localhost:3000
 ```
+
+The Express server serves the built SPA from `public/react/` and the JSON API under `/api/*`. There is no API proxy in the Vite dev server, so `npm run dev` is only useful for iterating on UI markup; run `npm run build && npm start` for full-stack work.
+
+### Environment Variables
+
+| Variable | Required | Purpose |
+|----------|----------|---------|
+| `MONGO_URI` | yes | MongoDB connection string |
+| `JWT_SECRET` | yes | Signing key for access tokens (32+ chars) |
+| `PORT` | no | HTTP port (default 3000) |
+| `ADMIN_EMAIL` | no | Seeds/identifies the admin account |
+| `RAZORPAY_KEY_ID` / `RAZORPAY_KEY_SECRET` | no | Live Razorpay payments; simulated checkout is used when unset |
+| `VAPID_PUBLIC_KEY` | no | Web Push public key served to the client |
+| `API_RATE_LIMIT_MAX` | no | Global API request budget per 15 min (default 150; 10000 in `NODE_ENV=test`) |
 
 ---
 
@@ -28,12 +40,13 @@ node server.js     # backend API on http://localhost:3000 (or PORT in .env)
 
 | Command | Description |
 |---------|-------------|
-| `npm run dev` | Start Vite dev server for the React frontend |
-| `npm run build` | Build frontend for production (`dist/`) |
-| `npm start` | Start Express production server |
-| `npm test` | Run backend integration test suite (requires MongoDB) |
-| `npm run test:ui` | Run UI/interface test suite (auto-starts the server) |
-| `npm run seed` | Seed the database with sample data |
+| `npm run dev` | Vite dev server for the React UI (no API proxy) |
+| `npm run build` | Build the SPA into `public/react/` |
+| `npm start` | Start the Express server |
+| `npm test` | Backend integration suite (`test.js`, node:test) |
+| `npm run test:ui` | HTTP interface suite (`test-interfaces.js`, auto-starts the server) |
+| `npm run test:ux` | End-to-end UX/security suite (`test-ux-rigorous.js`, needs a seeded DB) |
+| `npm run seed` | Seed sample restaurants, menus, and users |
 
 ---
 
@@ -42,54 +55,31 @@ node server.js     # backend API on http://localhost:3000 (or PORT in .env)
 ```
 truehomes-app/
 │
-├─ src/react/                    ← React frontend (Vite)
-│   ├─ App.jsx                   ← Root component with AppProvider, lazy modals
-│   ├─ main.jsx                  ← Legacy monolithic component (kept for reference)
-│   ├─ styles.css                ← Global stylesheet
-│   │
-│   ├─ context/
-│   │   └─ AppContext.jsx        ← React Context + useReducer for user/cart/toasts
-│   │
-│   └─ components/
-│       ├─ Header.jsx            ← Responsive navigation header (new)
-│       ├─ TopBar.jsx            ← Sticky top bar with search & account menu
-│       ├─ RestaurantList.jsx    ← Restaurant grid with cuisine filter pills
-│       ├─ ChatModal.jsx         ← In-app live chat modal (lazy-loaded)
-│       ├─ KitchenPortal.jsx     ← Kitchen owner dashboard modal (lazy-loaded)
-│       └─ Toast.jsx             ← Toast notification stack (auto-dismiss 4 s)
+├─ src/react/
+│   ├─ main.jsx                  ← The entire React SPA (single entry, no component split yet)
+│   └─ styles.css                ← Global stylesheet
+│
+├─ index.react.html              ← Vite entry HTML (dev)
+├─ vite.config.mjs               ← Builds the SPA into public/react/
 │
 ├─ public/
-│   ├─ index.html                ← Legacy HTML shell (Vanilla JS version)
-│   ├─ service-worker.js         ← PWA service worker (skips /api/* caching)
-│   └─ js/                       ← Legacy JS modules (Vanilla JS version)
+│   ├─ react/                    ← Build output served by Express (committed)
+│   ├─ manifest.json             ← PWA manifest
+│   └─ service-worker.js         ← Offline cache + Web Push handlers
 │
 ├─ models/                       ← Mongoose schemas
 │   ├─ User.js, Order.js, Restaurant.js, Review.js
 │   ├─ Chat.js, WalletTransaction.js, Coupon.js, RefreshSession.js
 │
 ├─ server.js                     ← Express API server (JWT auth, SSE, push)
-├─ test.js                       ← Backend integration test suite
-├─ test-interfaces.js            ← UI/interface verification suite
 ├─ seed.js                       ← Database seeder
-├─ .github/workflows/ci.yml      ← GitHub Actions CI/CD pipeline
-└─ package.json
+├─ test.js                       ← Backend integration suite
+├─ test-interfaces.js            ← HTTP interface suite
+├─ test-ux-rigorous.js           ← End-to-end UX/security suite
+└─ .github/workflows/            ← CI pipelines
 ```
 
-### Component Hierarchy
-
-```
-<App>                        ← AppProvider wraps everything
-  <AppInner>                 ← Consumes AppContext
-    <TopBar />               ← Sticky navigation bar
-    <RestaurantList />       ← Filter pills + restaurant grid
-    <Toast />                ← Floating notification stack
-    <Suspense>
-      <ChatModal />          ← Lazy-loaded in-app chat
-      <KitchenPortal />      ← Lazy-loaded kitchen dashboard
-    </Suspense>
-  </AppInner>
-</App>
-```
+**Single frontend.** `src/react/main.jsx` is the only UI implementation; Vite bundles it into `public/react/`, and Express serves that build for `/` and all non-API routes. Earlier experiments (a vanilla-JS app under `public/js/` and a partially-ported component tree under `src/react/components/`) have been removed so there is exactly one frontend to maintain. The service worker is registered from the SPA entry.
 
 ---
 
@@ -97,81 +87,35 @@ truehomes-app/
 
 | Role | Capabilities |
 |------|-------------|
-| `customer` | Browse restaurants, add to cart, checkout, track orders, view/cancel orders, write reviews, use wallet & cashback |
-| `kitchen_owner` | Manage restaurant (open/close), toggle dish stock, view orders, chat with customers (`Ctrl+K` shortcut) |
-| `delivery_partner` | View available orders, claim deliveries, update status, share GPS location, earn tips |
-| `admin` | Full dashboard: manage kitchens, approve delivery partners, view all orders (live SSE stream), manage coupons |
+| `customer` | Browse restaurants, cart & checkout, track orders via SSE, cancel orders (wallet/gateway refunds), chat with kitchen/rider, reviews, wallet & cashback, coupons |
+| `kitchen_owner` | Toggle kitchen open/closed, mark dishes in/out of stock, view and progress orders, chat with customers |
+| `delivery_partner` | Claim deliveries, update status, verify delivery OTP, share GPS, earn tips |
+| `admin` | Manage kitchens, assign kitchen owners, approve riders, view all orders live, manage coupons, analytics |
+
+## Order Lifecycle
+
+`CONFIRMED → PREPARING → OUT_FOR_DELIVERY → DELIVERED`, plus `CANCELLED`.
+
+- Orders can only be created for open kitchens with in-stock dishes.
+- Marking an order `DELIVERED` requires the delivery OTP shown to the customer.
+- Cancelling restores any wallet amount spent and refunds paid orders (Razorpay refund when configured, simulated otherwise) and records a `REFUND` wallet transaction.
 
 ---
 
-## New Features (v2)
+## Testing
 
-### 1. Kitchen Owner Portal
-A modal dashboard for `kitchen_owner` users, opened via the account menu or the global keyboard shortcut **`Ctrl+K`**.
-- **Overview tab**: View all current orders, their status, and launch a live chat session per order.
-- **Menu tab**: Toggle individual dishes between In Stock / Out of Stock.
-- Toggle the entire kitchen Open / Closed with a single button.
+Three suites cover the stack at different levels:
 
-### 2. In‑App Live Chat
-Real-time chat modal attached to any order code.
-- Messages stream via SSE (`/api/orders/:code/chat/stream`).
-- Auto-scrolls to the latest message.
-- Works for both customer and kitchen owner sides.
-- Fully keyboard-accessible (Enter to send, Escape to close).
+| Suite | Command | Notes |
+|-------|---------|-------|
+| Backend integration | `npm test` | Spawns its own server (port 5055) and creates its own fixtures |
+| HTTP interfaces | `npm run test:ui` | Spawns a server on port 5066; needs seeded restaurants |
+| UX / security | `npm run test:ux` | Seeds a scratch DB first, then uses `UI_TEST_PORT` |
 
-### 3. Customer Wallet & Cashback
-- Wallet balance fetched from `/api/user/wallet` and shown in the account dropdown.
-- At checkout, tick "Use Wallet Balance" to deduct the available amount from the order total.
-- 5% cashback note displayed next to the wallet balance.
-
-### 4. PWA Push Notifications
-- A prompt banner appears on first login if `Notification.permission === "default"`.
-- Accepts the VAPID-based push subscription from `/api/push/vapid-public-key`.
-- Subscription state is persisted in `localStorage` (`truehomes_push_subscribed`) so the banner never shows twice.
-- Full offline banner (`⚠️ You are offline`) is always visible when connectivity is lost.
-
----
-
-## State Management
-
-Global state (`user`, `cart`, `toasts`, `isOffline`) is managed via **React Context + `useReducer`** (`src/react/context/AppContext.jsx`). The `useAppContext()` hook and a convenience `toast(message)` helper are exported for use in any component.
-
----
-
-## Accessibility
-
-- All interactive elements have descriptive `aria-label` attributes.
-- Modals set `role="dialog"` and `aria-modal="true"`.
-- The account menu uses `aria-haspopup` / `aria-expanded`.
-- Toast messages use `role="status"` and `aria-live="polite"`.
-- The Kitchen Portal is opened with `Ctrl+K` (or `Cmd+K` on macOS).
-- Escape key closes any open modal.
+Each suite scopes its cleanup to data it created. **Always point `MONGO_URI` at a throwaway database** (e.g. `truehomes_test_run1`) when running tests; never at a database with real data.
 
 ---
 
 ## CI/CD
 
-A **GitHub Actions** workflow (`.github/workflows/ci.yml`) runs on every push/PR:
-1. Spins up a MongoDB 7 service container.
-2. Installs dependencies and builds the frontend.
-3. Runs `npm run test:ui` (UI/interface suite).
-4. Runs `npm test` (backend integration suite).
-5. Checks for stray `console.log` statements in source files.
-
----
-
-## Running the UI Tests Locally
-
-```bash
-cd truehomes-app
-npm run test:ui
-```
-
-The suite spins up the Express server on port 5066, runs all HTTP-level interface checks, and exits with a summary. It requires a running MongoDB instance (or the CI container).
-
-For the new Jest-style component tests:
-
-```bash
-npm install --save-dev jest @testing-library/react @testing-library/jest-dom
-npx jest src/react/__tests__/newFeatures.test.js
-```
+GitHub Actions workflows in `.github/workflows/` start a MongoDB service container, install dependencies, build the SPA, and run the test suites against the CI database (`truehomes_ci`).

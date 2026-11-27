@@ -25,9 +25,9 @@ const orderSchema = new mongoose.Schema(
     walletAmountUsed: { type: Number, default: 0, min: 0 },
     grandTotal: Number,
     paymentMethod: { type: String, enum: ['UPI', 'CARD', 'RAZORPAY', 'COD'], default: 'RAZORPAY' },
-    paymentStatus: { type: String, enum: ['PENDING', 'PAID', 'COD'], default: 'PENDING' },
+    paymentStatus: { type: String, enum: ['PENDING', 'PAID', 'COD', 'REFUNDED'], default: 'PENDING' },
     razorpayOrderId: { type: String, default: null },
-    razorpayPaymentId: { type: String, default: null },
+    razorpayPaymentId: { type: String },
     razorpayReceipt: { type: String, default: null },
     paymentVerifiedAt: { type: Date, default: null },
     assignedPartnerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
@@ -52,6 +52,9 @@ const orderSchema = new mongoose.Schema(
 orderSchema.index({ userId: 1, status: 1, createdAt: -1 });
 orderSchema.index({ assignedPartnerId: 1, status: 1, createdAt: -1 });
 orderSchema.index({ razorpayOrderId: 1 });
-orderSchema.index({ razorpayPaymentId: 1 }, { unique: true, sparse: true });
+orderSchema.index(
+  { razorpayPaymentId: 1 },
+  { unique: true, partialFilterExpression: { razorpayPaymentId: { $type: 'string' } } }
+);
 
 module.exports = mongoose.model('Order', orderSchema);

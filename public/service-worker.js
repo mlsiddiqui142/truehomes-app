@@ -1,9 +1,7 @@
 const CACHE_NAME = "truehomes-v2-pwa";
 const STATIC_ASSETS = [
   "/",
-  "/index.html",
-  "/manifest.json",
-  "/react/index.react.html"
+  "/manifest.json"
 ];
 
 self.addEventListener("install", (event) => {

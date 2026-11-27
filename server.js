@@ -231,7 +231,7 @@ app.get('/api/metrics', requireAuth, requireAdmin, (req, res) => {
 
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 150,
+  max: Number(process.env.API_RATE_LIMIT_MAX) || (process.env.NODE_ENV === 'test' ? 10000 : 150),
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many requests from this IP. Please try again later.' }
@@ -254,10 +254,10 @@ const orderLimiter = rateLimit({
   message: { error: 'Order limit reached. Please wait a few minutes before placing another order.' }
 });
 
+const REACT_INDEX = path.join(__dirname, 'public', 'react', 'index.react.html');
+
 app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'react', 'index.react.html'), (err) => {
-    if (err) res.sendFile(path.join(__dirname, 'public', 'index.html'));
-  });
+  res.sendFile(REACT_INDEX);
 });
 
 app.use(express.static(path.join(__dirname, 'public')));
@@ -744,7 +744,7 @@ app.post('/api/auth/logout', optionalAuth, async (req, res) => {
 app.get('/api/restaurants', async (req, res) => {
   try {
     const { search, veg, fast, sort } = req.query;
-    const query = {};
+    const query = { isOpen: { $ne: false } };
 
     if (veg === 'true') query.isPureVeg = true;
     if (fast === 'true') query.deliveryTime = { $lte: 30 };
@@ -788,6 +788,9 @@ app.post('/api/orders', orderLimiter, optionalAuth, async (req, res) => {
 
     const restaurant = await Restaurant.findById(restaurantId);
     if (!restaurant) return res.status(404).json({ error: 'Restaurant not found' });
+    if (restaurant.isOpen === false) {
+      return res.status(409).json({ error: 'This kitchen is currently closed and not accepting orders' });
+    }
 
     let itemTotal = 0;
     const verifiedItems = [];
@@ -796,6 +799,9 @@ app.post('/api/orders', orderLimiter, optionalAuth, async (req, res) => {
       const dbItem = restaurant.menu.id(cartItem.menuItemId);
       const qty = Math.min(Math.max(parseInt(cartItem.qty, 10) || 1, 1), 20);
       if (!dbItem) return res.status(400).json({ error: 'One or more menu items are invalid' });
+      if (dbItem.isAvailable === false) {
+        return res.status(409).json({ error: `${dbItem.name} is currently out of stock` });
+      }
 
       itemTotal += dbItem.price * qty;
       verifiedItems.push({ menuItemId: dbItem._id, name: dbItem.name, qty, unitPrice: dbItem.price });
@@ -1118,19 +1124,84 @@ app.post('/api/orders/:orderCode/cancel', requireAuth, async (req, res) => {
       ? req.body.reason.trim().slice(0, 150)
       : 'Customer requested cancellation';
 
-    order.status = 'CANCELLED';
-    order.cancellationReason = reason;
-    order.cancelledAt = new Date();
-    order.deliveryLocation = undefined;
-    if (order.paymentStatus === 'PAID') {
-      order.paymentStatus = 'REFUNDED';
+    const cancelled = await Order.findOneAndUpdate(
+      { _id: order._id, status: order.status },
+      {
+        $set: { status: 'CANCELLED', cancellationReason: reason, cancelledAt: new Date() },
+        $unset: { deliveryLocation: 1 }
+      },
+      { new: true }
+    );
+    if (!cancelled) {
+      return res.status(409).json({ error: 'Order status changed concurrently. Please retry.' });
     }
-    await order.save();
 
-    broadcastOrderUpdate(order);
+    let walletRefunded = 0;
+    if (cancelled.walletAmountUsed > 0 && cancelled.userId) {
+      const refundedUser = await User.findByIdAndUpdate(
+        cancelled.userId,
+        { $inc: { walletBalance: cancelled.walletAmountUsed } },
+        { new: true }
+      ).select('walletBalance');
+      if (refundedUser) {
+        walletRefunded = cancelled.walletAmountUsed;
+        await WalletTransaction.create({
+          userId: cancelled.userId,
+          type: 'REFUND',
+          amount: walletRefunded,
+          orderId: cancelled._id,
+          orderCode: cancelled.orderCode,
+          description: `Wallet refund for cancelled order #${cancelled.orderCode}`
+        });
+      }
+    }
+
+    let gatewayRefund = 'not_applicable';
+    if (cancelled.paymentStatus === 'PAID') {
+      const canRefundViaRazorpay =
+        cancelled.razorpayPaymentId &&
+        !cancelled.razorpayPaymentId.startsWith('pay_sim_') &&
+        process.env.RAZORPAY_KEY_ID &&
+        process.env.RAZORPAY_KEY_SECRET;
+
+      if (canRefundViaRazorpay) {
+        try {
+          const auth = Buffer.from(
+            `${process.env.RAZORPAY_KEY_ID}:${process.env.RAZORPAY_KEY_SECRET}`
+          ).toString('base64');
+          const refundRes = await fetch(
+            `https://api.razorpay.com/v1/payments/${encodeURIComponent(cancelled.razorpayPaymentId)}/refund`,
+            {
+              method: 'POST',
+              headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ amount: Math.round(cancelled.grandTotal * 100), speed: 'normal' })
+            }
+          );
+          if (!refundRes.ok) throw new Error(`Razorpay refund failed with status ${refundRes.status}`);
+          cancelled.paymentStatus = 'REFUNDED';
+          gatewayRefund = 'refunded';
+        } catch (refundErr) {
+          log('error', 'order_refund_failed', {
+            requestId: req.requestId,
+            orderCode: cancelled.orderCode,
+            error: refundErr.message
+          });
+          gatewayRefund = 'failed';
+        }
+      } else {
+        // Simulated/manual payments have no gateway transaction to reverse
+        cancelled.paymentStatus = 'REFUNDED';
+        gatewayRefund = 'refunded';
+      }
+      await cancelled.save();
+    }
+
+    broadcastOrderUpdate(cancelled);
     return res.json({
       message: 'Order cancelled successfully',
-      order
+      order: cancelled,
+      walletRefunded,
+      gatewayRefund
     });
   } catch (err) {
     return res.status(500).json({ error: 'Failed to cancel order' });
@@ -1471,8 +1542,8 @@ app.patch('/api/delivery/orders/:id/status', requireAuth, requireDeliveryPartner
 
     if (status === 'DELIVERED' && order.deliveryOtp) {
       const providedOtp = String(req.body.otp || '').trim();
-      if (providedOtp && providedOtp !== order.deliveryOtp) {
-        return res.status(400).json({ error: 'Invalid delivery verification OTP' });
+      if (providedOtp !== order.deliveryOtp) {
+        return res.status(400).json({ error: 'A valid delivery verification OTP is required' });
       }
     }
 
@@ -2101,15 +2172,8 @@ app.post('/api/user/push-subscribe', requireAuth, async (req, res) => {
   }
 });
 
-app.get('/legacy', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
-});
-
 app.use((req, res) => {
-  const reactIndex = path.join(__dirname, 'public', 'react', 'index.react.html');
-  res.sendFile(reactIndex, (err) => {
-    if (err) res.sendFile(path.join(__dirname, 'public', 'index.html'));
-  });
+  res.sendFile(REACT_INDEX);
 });
 
 app.use((err, req, res, next) => {
