@@ -6,20 +6,35 @@
   "scope": "/",
   "display": "standalone",
   "orientation": "portrait-primary",
-  "background_color": "#f8fafc",
+  "background_color": "#0f172a",
   "theme_color": "#ea580c",
+  "categories": ["food", "shopping", "lifestyle"],
   "icons": [
     {
       "src": "https://images.unsplash.com/photo-1504674900247-0877df9cc836?w=192&q=80",
       "sizes": "192x192",
       "type": "image/jpeg",
-      "purpose": "any"
+      "purpose": "any maskable"
     },
     {
       "src": "https://images.unsplash.com/photo-1504674900247-0877df9cc836?w=512&q=80",
       "sizes": "512x512",
       "type": "image/jpeg",
-      "purpose": "any"
+      "purpose": "any maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Track Order",
+      "short_name": "Track",
+      "url": "/?action=track",
+      "icons": [{ "src": "https://images.unsplash.com/photo-1504674900247-0877df9cc836?w=192&q=80", "sizes": "192x192" }]
+    },
+    {
+      "name": "View Cart",
+      "short_name": "Cart",
+      "url": "/?action=cart",
+      "icons": [{ "src": "https://images.unsplash.com/photo-1504674900247-0877df9cc836?w=192&q=80", "sizes": "192x192" }]
     }
   ]
 }

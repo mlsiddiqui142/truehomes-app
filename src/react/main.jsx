@@ -313,6 +313,16 @@ function App() {
     const handleOffline = () => setIsOffline(true);
     window.addEventListener("online", handleOnline);
     window.addEventListener("offline", handleOffline);
+
+    // Support PWA shortcuts and direct URLs (e.g. /?action=track, /?action=cart, /?action=profile)
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const action = params.get("action");
+      if (action === "track") setTrackerOpen(true);
+      else if (action === "cart") setCartOpen(true);
+      else if (action === "profile") setProfileOpen(true);
+    } catch (_) {}
+
     return () => {
       window.removeEventListener("online", handleOnline);
       window.removeEventListener("offline", handleOffline);
@@ -1369,7 +1379,9 @@ function App() {
         </div>
       )}
       <header className="topbar">
-        <div className="brand">True<span>Homes</span></div>
+        <div className="brand" onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })} style={{ cursor: "pointer" }}>
+          True<span>Homes</span>
+        </div>
         <input
           className="search"
           value={search}
@@ -1379,17 +1391,18 @@ function App() {
         <div className="actions">
           <button
             type="button"
-            className={`veg-mode-toggle ${globalVegOnly ? "active" : ""}`}
+            className={`veg-mode-toggle desktop-only ${globalVegOnly ? "active" : ""}`}
             onClick={() => setGlobalVegOnly(!globalVegOnly)}
             title="Toggle Pure Vegetarian Kitchens & Items"
           >
             <span className="veg-icon">🌱</span>
             <span>{globalVegOnly ? "Veg Only ON" : "Veg Only"}</span>
           </button>
-          <button type="button" onClick={() => setTrackerOpen(true)}>
+          <button type="button" className="desktop-only" onClick={() => setTrackerOpen(true)}>
             Track Order
           </button>
           <button
+            className="user-profile-btn"
             onClick={() => user ? setAccountOpen((open) => !open) : setAuthOpen(true)}
             style={{ display: "inline-flex", alignItems: "center", gap: 7 }}
           >
@@ -1402,7 +1415,7 @@ function App() {
             ) : null}
             <span>{user ? user.name.split(" ")[0] : "Sign in"}</span>
           </button>
-          <button className="cart-button" onClick={() => setCartOpen(true)}>
+          <button className="cart-button desktop-only" onClick={() => setCartOpen(true)}>
             Cart <b>{cart.reduce((sum, item) => sum + item.qty, 0)}</b>
           </button>
         </div>
@@ -3709,6 +3722,114 @@ function App() {
             </div>
           </div>
         )}
+
+        {/* Swiggy/Zomato style Floating Cart Pill for Mobile */}
+        {cart.length > 0 && !cartOpen && (
+          <div className="mobile-floating-cart-pill" onClick={() => setCartOpen(true)}>
+            <div className="mobile-floating-cart-info">
+              <span className="cart-pill-qty">{cart.reduce((sum, item) => sum + item.qty, 0)} {cart.reduce((sum, item) => sum + item.qty, 0) === 1 ? "ITEM" : "ITEMS"}</span>
+              <span className="cart-pill-divider">·</span>
+              <span className="cart-pill-total">₹{finalTotal}</span>
+            </div>
+            <div className="mobile-floating-cart-btn">
+              <span>View Cart</span>
+              <span className="cart-pill-arrow">🛒 →</span>
+            </div>
+          </div>
+        )}
+
+        {/* Mobile Bottom Navigation Bar (Visible on <= 768px screens) */}
+        <nav className="mobile-bottom-nav" aria-label="Mobile Navigation">
+          <button
+            type="button"
+            className={`mobile-nav-item ${!trackerOpen && !cartOpen && !profileOpen && !customerOrdersOpen && !deliveryOpen && !kitchenOpen && !adminOpen ? "active" : ""}`}
+            onClick={() => {
+              setTrackerOpen(false);
+              setCartOpen(false);
+              setProfileOpen(false);
+              setAccountOpen(false);
+              setCustomerOrdersOpen(false);
+              setDeliveryOpen(false);
+              setKitchenOpen(false);
+              setAdminOpen(false);
+              window.scrollTo({ top: 0, behavior: "smooth" });
+            }}
+          >
+            <span className="mobile-nav-icon">🏠</span>
+            <span className="mobile-nav-label">Explore</span>
+          </button>
+
+          <button
+            type="button"
+            className={`mobile-nav-item ${globalVegOnly ? "active veg-active" : ""}`}
+            onClick={() => setGlobalVegOnly(!globalVegOnly)}
+          >
+            <span className="mobile-nav-icon">🌱</span>
+            <span className="mobile-nav-label">{globalVegOnly ? "Pure Veg" : "Veg Mode"}</span>
+          </button>
+
+          <button
+            type="button"
+            className={`mobile-nav-item ${trackerOpen ? "active" : ""}`}
+            onClick={() => {
+              setTrackerOpen(true);
+              setCartOpen(false);
+              setProfileOpen(false);
+            }}
+          >
+            <span className="mobile-nav-icon">🛵</span>
+            <span className="mobile-nav-label">Track</span>
+          </button>
+
+          <button
+            type="button"
+            className={`mobile-nav-item ${cartOpen ? "active" : ""}`}
+            onClick={() => {
+              setCartOpen(true);
+              setTrackerOpen(false);
+              setProfileOpen(false);
+            }}
+          >
+            <span className="mobile-nav-icon-wrapper">
+              <span className="mobile-nav-icon">🛒</span>
+              {cart.reduce((sum, item) => sum + item.qty, 0) > 0 && (
+                <span className="mobile-nav-badge">
+                  {cart.reduce((sum, item) => sum + item.qty, 0)}
+                </span>
+              )}
+            </span>
+            <span className="mobile-nav-label">Cart</span>
+          </button>
+
+          <button
+            type="button"
+            className={`mobile-nav-item ${(profileOpen || accountOpen) ? "active" : ""}`}
+            onClick={() => {
+              if (!user) {
+                setAuthOpen(true);
+              } else {
+                setProfileNameInput(user.name || "");
+                setProfilePhoneInput(user.phone || "");
+                setProfileAvatarInput(user.avatar || "");
+                setProfileBioInput(user.bio || "");
+                setProfileDietaryInput(user.dietaryPreference || "all");
+                setProfileDobInput(user.dateOfBirth || "");
+                setProfileGenderInput(user.gender || "prefer_not_to_say");
+                setProfileActiveTab("overview");
+                setProfileOpen(true);
+              }
+            }}
+          >
+            <span className="mobile-nav-icon">
+              {user?.avatar ? (
+                <img src={user.avatar} alt="" className="mobile-nav-avatar" />
+              ) : (
+                "👤"
+              )}
+            </span>
+            <span className="mobile-nav-label">{user ? (user.name ? user.name.split(" ")[0] : "Profile") : "Sign In"}</span>
+          </button>
+        </nav>
     </div>
   );
 }
