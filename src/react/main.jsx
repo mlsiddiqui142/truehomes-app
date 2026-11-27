@@ -377,6 +377,15 @@ function App() {
     api("/api/user/referral")
       .then(setReferralData)
       .catch(() => {});
+    if (profileOpen) {
+      if (user.role === "customer") {
+        api("/api/orders/my").then(setCustomerOrders).catch(() => {});
+      } else if (user.role === "delivery_partner") {
+        api("/api/delivery/orders").then(setPartnerOrders).catch(() => {});
+      } else if (user.role === "kitchen_owner") {
+        api("/api/kitchen/my/orders").then(setKitchenOrders).catch(() => {});
+      }
+    }
   }, [user, profileOpen, accountOpen, cartOpen]);
 
   useEffect(() => {
@@ -3962,12 +3971,14 @@ function App() {
                             <button
                               type="button"
                               className="addr-action-btn edit-btn"
+                              disabled={hasActiveTransaction}
+                              style={{ opacity: hasActiveTransaction ? 0.5 : 1 }}
                               onClick={() => {
                                 setEditingAddrId(a._id);
                                 setEditAddrLabel(a.label || "Home");
                                 setEditAddrText(a.address);
                               }}
-                              title="Edit address"
+                              title={hasActiveTransaction ? "Locked during active order" : "Edit address"}
                             >
                               ✏️
                             </button>
@@ -3976,8 +3987,10 @@ function App() {
                             <button
                               type="button"
                               className="addr-delete-btn"
+                              disabled={hasActiveTransaction}
+                              style={{ opacity: hasActiveTransaction ? 0.5 : 1 }}
                               onClick={() => deleteProfileAddress(a._id)}
-                              title="Delete address"
+                              title={hasActiveTransaction ? "Locked during active order" : "Delete address"}
                             >
                               ✕
                             </button>

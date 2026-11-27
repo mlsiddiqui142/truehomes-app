@@ -2611,7 +2611,7 @@ let server;
 
 async function ensureRootAdmin() {
   try {
-    const rootEmail = (process.env.ROOT_ADMIN_EMAIL || process.env.ADMIN_EMAIL || 'rootadmin@truehomes.local').trim().toLowerCase();
+    const rootEmail = (process.env.ROOT_ADMIN_EMAIL || 'rootadmin@truehomes.local').trim().toLowerCase();
     const existingRoot = await User.findOne({ isRootAdmin: true });
     if (!existingRoot) {
       const existingEmail = await User.findOne({ email: rootEmail });

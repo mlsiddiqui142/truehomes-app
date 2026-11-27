@@ -784,7 +784,17 @@ describe('TrueHomes Full-Stack & Cyber-Security Automated Suite', () => {
     assert.ok(adminStream.headers.get('content-type')?.includes('text/event-stream'));
     const adminReader = adminStream.body.getReader();
     const adminDecoder = new TextDecoder();
-    const adminSnapshot = adminDecoder.decode((await adminReader.read()).value);
+    async function readSseUntil(streamReader, textDecoder, matchStr) {
+      let buf = '';
+      for (let i = 0; i < 15; i++) {
+        const { done, value } = await streamReader.read();
+        if (value) buf += textDecoder.decode(value, { stream: true });
+        if (buf.includes(matchStr)) return buf;
+        if (done) break;
+      }
+      return buf;
+    }
+    const adminSnapshot = await readSseUntil(adminReader, adminDecoder, createdOrderCode);
     assert.ok(adminSnapshot.includes('"type":"snapshot"'));
     assert.ok(adminSnapshot.includes(createdOrderCode));
 
@@ -798,8 +808,7 @@ describe('TrueHomes Full-Stack & Cyber-Security Automated Suite', () => {
     const decoder = new TextDecoder();
 
     // 1. Initial snapshot
-    const firstChunk = await reader.read();
-    const firstText = decoder.decode(firstChunk.value);
+    const firstText = await readSseUntil(reader, decoder, createdOrderCode);
     assert.ok(firstText.includes('data:'));
     assert.ok(firstText.includes(createdOrderCode));
 
@@ -822,7 +831,7 @@ describe('TrueHomes Full-Stack & Cyber-Security Automated Suite', () => {
     const newOrder = await newOrderRes.json();
     assert.equal(newOrderRes.status, 201);
     liveStreamTestOrderCode = newOrder.orderCode;
-    const newOrderChunk = adminDecoder.decode((await adminReader.read()).value);
+    const newOrderChunk = await readSseUntil(adminReader, adminDecoder, liveStreamTestOrderCode);
     assert.ok(newOrderChunk.includes('"type":"order"'));
     assert.ok(newOrderChunk.includes(liveStreamTestOrderCode));
 

@@ -322,20 +322,52 @@ async function runTests() {
     assert.ok([200, 201].includes(res.status), `Referral endpoint failed: ${res.status}`);
   });
 
-  await test('2.16 Customer: Save delivery address', async () => {
-    const { res, body } = await req('/api/user/addresses', {
+  await test('2.16 Customer: Save delivery address (locked during active order, succeeds when idle)', async () => {
+    // 1. Active order locks address modification
+    const { res: lockedRes } = await req('/api/user/addresses', {
       method: 'POST',
       body: JSON.stringify({ label: 'Home', address: '42 Elm Street, Indirapuram' }),
     }, customerToken);
+    assert.equal(lockedRes.status, 400, 'Address save should be locked while order is active');
+
+    // 2. Clean customer without active orders can save address
+    const { body: regBody } = await req('/api/auth/register', {
+      method: 'POST',
+      headers: { 'X-Forwarded-For': '198.51.100.200' },
+      body: JSON.stringify({
+        name: 'Idle Customer',
+        email: `idle_${run}@truehomes.test`,
+        phone: '+91 9800000099',
+        password: PWD,
+      }),
+    });
+    const idleToken = regBody.token;
+    const { res, body } = await req('/api/user/addresses', {
+      method: 'POST',
+      body: JSON.stringify({ label: 'Home', address: '42 Elm Street, Indirapuram' }),
+    }, idleToken);
     assert.ok([200, 201].includes(res.status), `Address save failed: ${JSON.stringify(body)}`);
     assert.ok(Array.isArray(body.addresses), 'addresses must be array');
   });
 
-  await test('2.17 Customer: Update profile name and phone', async () => {
+  await test('2.17 Customer: Update profile name and phone (locked during active order, succeeds when idle)', async () => {
+    // 1. Active order locks profile update
+    const { res: lockedRes } = await req('/api/user/profile', {
+      method: 'PATCH',
+      body: JSON.stringify({ name: 'Blocked Update' }),
+    }, customerToken);
+    assert.equal(lockedRes.status, 400, 'Profile update should be locked while order is active');
+
+    // 2. Clean customer without active orders can update profile
+    const { body: loginBody } = await req('/api/auth/login', {
+      method: 'POST',
+      headers: { 'X-Forwarded-For': '198.51.100.201' },
+      body: JSON.stringify({ email: `idle_${run}@truehomes.test`, password: PWD }),
+    });
     const { res, body } = await req('/api/user/profile', {
       method: 'PATCH',
       body: JSON.stringify({ name: 'Rig Customer Updated', phone: '+91 9800000001' }),
-    }, customerToken);
+    }, loginBody.token);
     assert.ok([200, 201].includes(res.status), `Profile update failed: ${JSON.stringify(body)}`);
   });
 
@@ -927,7 +959,7 @@ async function runTests() {
     const WalletTransaction = require('./models/WalletTransaction');
 
     await mongoose.connect(process.env.MONGO_URI);
-    const testEmails = Object.values(emails).filter(Boolean);
+    const testEmails = [...Object.values(emails).filter(Boolean), `idle_${run}@truehomes.test`];
     const users = await User.find({ email: { $in: testEmails } }).select('_id').lean();
     const userIds = users.map((u) => u._id);
     if (userIds.length) {
