@@ -154,6 +154,8 @@ function App() {
   const [authOpen, setAuthOpen] = useState(false);
   const [authMode, setAuthMode] = useState("login");
   const [authRole, setAuthRole] = useState("customer");
+  const [authCategory, setAuthCategory] = useState("non_admin"); // "non_admin" | "admin"
+  const [authAdminType, setAuthAdminType] = useState("root"); // "root" | "normal"
   const [user, setUser] = useState(null);
   const [accountOpen, setAccountOpen] = useState(false);
   const [adminOpen, setAdminOpen] = useState(false);
@@ -269,6 +271,15 @@ function App() {
   const [deliveryReviews, setDeliveryReviews] = useState([]);
   const [adminReviews, setAdminReviews] = useState([]);
 
+  // Users Directory & Root Admin Console
+  const [adminUsersList, setAdminUsersList] = useState([]);
+  const [adminAdminsList, setAdminAdminsList] = useState([]);
+  const [adminUserFilter, setAdminUserFilter] = useState("all");
+  const [newAdminName, setNewAdminName] = useState("");
+  const [newAdminEmail, setNewAdminEmail] = useState("");
+  const [newAdminPhone, setNewAdminPhone] = useState("");
+  const [newAdminPassword, setNewAdminPassword] = useState("");
+
   // Feature 2: Live In-App Chat States
   const [chatOrderCode, setChatOrderCode] = useState(null);
   const [chatMessages, setChatMessages] = useState([]);
@@ -328,6 +339,15 @@ function App() {
       window.removeEventListener("offline", handleOffline);
     };
   }, []);
+
+  // Auto-dismiss alert popups (notices) after at most 3 seconds
+  useEffect(() => {
+    if (!notice) return;
+    const timer = setTimeout(() => {
+      setNotice("");
+    }, 3000);
+    return () => clearTimeout(timer);
+  }, [notice]);
 
   useEffect(() => {
     if (user && "Notification" in window && Notification.permission === "default") {
@@ -415,6 +435,12 @@ function App() {
       .catch(() => {});
     api("/api/admin/reviews")
       .then(setAdminReviews)
+      .catch(() => {});
+    api("/api/admin/users")
+      .then(setAdminUsersList)
+      .catch(() => {});
+    api("/api/admin/admins")
+      .then((data) => setAdminAdminsList(data.admins || []))
       .catch(() => {});
   }, [adminOpen, user?.role]);
 
@@ -637,6 +663,22 @@ function App() {
   const finalTotal = useMemo(() => {
     return Math.max(0, baseOrderTotal - walletDeduction);
   }, [baseOrderTotal, walletDeduction]);
+
+  const hasActiveTransaction = useMemo(() => {
+    if (!user) return false;
+    const activeStatuses = ["PLACED", "CONFIRMED", "PREPARING", "OUT_FOR_DELIVERY", "placed", "confirmed", "preparing", "out_for_delivery"];
+    const activePartnerStatuses = ["CONFIRMED", "PREPARING", "OUT_FOR_DELIVERY", "confirmed", "preparing", "out_for_delivery"];
+    if (user.role === "customer") {
+      return (customerOrders || []).some((o) => activeStatuses.includes(o.status));
+    }
+    if (user.role === "delivery_partner") {
+      return (partnerOrders || []).some((o) => activePartnerStatuses.includes(o.status));
+    }
+    if (user.role === "kitchen_owner") {
+      return (kitchenOrders || []).some((o) => activeStatuses.includes(o.status));
+    }
+    return false;
+  }, [user, customerOrders, partnerOrders, kitchenOrders]);
 
   async function toggleKitchenDuty() {
     try {
@@ -941,10 +983,75 @@ function App() {
     setRiderTip(0);
   }
 
+  async function approveUser(userId) {
+    try {
+      const res = await api(`/api/admin/users/${userId}/approve`, { method: "PATCH" });
+      setNotice(res.message || "User approved");
+      api("/api/admin/users").then(setAdminUsersList).catch(() => {});
+    } catch (err) {
+      setNotice(err.message || "Failed to approve user");
+    }
+  }
+
+  async function toggleUserStatus(userId) {
+    try {
+      const res = await api(`/api/admin/users/${userId}/status`, { method: "PATCH" });
+      setNotice(res.message || "User status updated");
+      api("/api/admin/users").then(setAdminUsersList).catch(() => {});
+    } catch (err) {
+      setNotice(err.message || "Failed to update user status");
+    }
+  }
+
+  async function approveAdmin(adminId) {
+    try {
+      const res = await api(`/api/admin/admins/${adminId}/approve`, { method: "PATCH" });
+      setNotice(res.message || "Admin approved");
+      api("/api/admin/admins").then((d) => setAdminAdminsList(d.admins || [])).catch(() => {});
+    } catch (err) {
+      setNotice(err.message || "Failed to approve admin");
+    }
+  }
+
+  async function revokeAdmin(adminId) {
+    if (!window.confirm("Are you sure you want to revoke administrator privileges for this user?")) return;
+    try {
+      const res = await api(`/api/admin/admins/${adminId}/revoke`, { method: "PATCH" });
+      setNotice(res.message || "Admin revoked");
+      api("/api/admin/admins").then((d) => setAdminAdminsList(d.admins || [])).catch(() => {});
+    } catch (err) {
+      setNotice(err.message || "Failed to revoke admin");
+    }
+  }
+
+  async function createAdmin(e) {
+    e.preventDefault();
+    try {
+      const res = await api("/api/admin/admins", {
+        method: "POST",
+        body: JSON.stringify({
+          name: newAdminName,
+          email: newAdminEmail,
+          phone: newAdminPhone,
+          password: newAdminPassword
+        })
+      });
+      setNotice(res.message || "Administrator created");
+      setNewAdminName("");
+      setNewAdminEmail("");
+      setNewAdminPhone("");
+      setNewAdminPassword("");
+      api("/api/admin/admins").then((d) => setAdminAdminsList(d.admins || [])).catch(() => {});
+    } catch (err) {
+      setNotice(err.message || "Failed to create administrator");
+    }
+  }
+
   async function login(event) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     try {
+      const effectiveRole = authCategory === "admin" ? "admin" : authRole;
       const endpoint =
         authMode === "register"
           ? "/api/auth/register"
@@ -955,13 +1062,13 @@ function App() {
             email: form.get("email"),
             phone: form.get("phone"),
             password: form.get("password"),
-            role: authRole,
+            role: effectiveRole,
             referralCode: form.get("referralCode") || undefined
           }
         : {
             email: form.get("email"),
             password: form.get("password"),
-            role: authRole,
+            role: effectiveRole,
           };
       const data = await api(endpoint, {
         method: "POST",
@@ -972,7 +1079,7 @@ function App() {
         setNotice(data.message);
         return;
       }
-      if (data.user.role !== authRole) {
+      if (data.user.role !== effectiveRole) {
         throw new Error(
           `This account is registered as ${String(data.user.role).replace("_", " ")}. Choose that login option.`,
         );
@@ -987,7 +1094,7 @@ function App() {
       setNotice(
         authMode === "register"
           ? `Account created, welcome ${data.user.name}`
-          : `Welcome, ${data.user.name}`
+          : `Welcome, ${data.user.name}${data.user.isRootAdmin ? " (Root Admin)" : ""}`
       );
     } catch (error) {
       setNotice(
@@ -1807,62 +1914,139 @@ function App() {
         <div className="modal-backdrop" onMouseDown={() => setAuthOpen(false)}>
           <form className="modal" onSubmit={login} onMouseDown={(event) => event.stopPropagation()}>
             <button type="button" className="close" onClick={() => setAuthOpen(false)}>×</button>
-            <h2>{authMode === "login" ? "Sign in" : authRole === "delivery_partner" ? "Apply as delivery partner" : "Create account"}</h2>
-            <div className="auth-role-tabs">
-              {[
-                ["customer", "Customer"],
-                ["admin", "Admin"],
-                ["delivery_partner", "Delivery partner"],
-                ["kitchen_owner", "Kitchen owner"],
-              ].map(([role, label]) => (
-                <button
-                  type="button"
-                  key={role}
-                  className={authRole === role ? "active" : ""}
-                  onClick={() => {
-                    setAuthRole(role);
-                    setAuthMode("login");
-                  }}
-                >{label}</button>
-              ))}
-            </div>
-            <div className="auth-tabs">
-              <button type="button" className={authMode === "login" ? "active" : ""} onClick={() => setAuthMode("login")}>Sign in</button>
-              {authRole !== "admin" && (
-                <button type="button" className={authMode === "register" ? "active" : ""} onClick={() => setAuthMode("register")}>
-                  {authRole === "delivery_partner" ? "Apply" : "Register"}
-                </button>
-              )}
 
-        
+            {/* TWO PRIMARY SECTIONS: Non-Admin vs Admin Portal */}
+            <div className="auth-main-category-toggle">
+              <button
+                type="button"
+                className={`auth-category-btn ${authCategory === "non_admin" ? "active" : ""}`}
+                onClick={() => {
+                  setAuthCategory("non_admin");
+                  setAuthRole("customer");
+                  setAuthMode("login");
+                }}
+              >
+                👥 Non-Admin Access
+              </button>
+              <button
+                type="button"
+                className={`auth-category-btn ${authCategory === "admin" ? "active" : ""}`}
+                onClick={() => {
+                  setAuthCategory("admin");
+                  setAuthRole("admin");
+                  setAuthMode("login");
+                }}
+              >
+                🛡️ Admin Portal
+              </button>
             </div>
+
+            {/* SECTION 1: NON-ADMIN (Customer, Delivery Partner, Kitchen Owner) */}
+            {authCategory === "non_admin" && (
+              <>
+                <h2>
+                  {authMode === "login"
+                    ? `Sign in as ${authRole === "customer" ? "Customer" : authRole === "delivery_partner" ? "Delivery Partner" : "Kitchen Owner"}`
+                    : authRole === "delivery_partner"
+                      ? "Apply as Delivery Partner"
+                      : authRole === "kitchen_owner"
+                        ? "Register Kitchen Owner"
+                        : "Create Customer Account"}
+                </h2>
+                <div className="auth-role-tabs">
+                  {[
+                    ["customer", "👤 Customer"],
+                    ["delivery_partner", "🛵 Delivery Partner"],
+                    ["kitchen_owner", "🍳 Kitchen Owner"],
+                  ].map(([role, label]) => (
+                    <button
+                      type="button"
+                      key={role}
+                      className={authRole === role ? "active" : ""}
+                      onClick={() => {
+                        setAuthRole(role);
+                        setAuthMode("login");
+                      }}
+                    >{label}</button>
+                  ))}
+                </div>
+                <div className="auth-tabs">
+                  <button type="button" className={authMode === "login" ? "active" : ""} onClick={() => setAuthMode("login")}>Sign in</button>
+                  <button type="button" className={authMode === "register" ? "active" : ""} onClick={() => setAuthMode("register")}>
+                    {authRole === "delivery_partner" ? "Apply" : "Register"}
+                  </button>
+                </div>
+              </>
+            )}
+
+            {/* SECTION 2: ADMIN (Root Admin & Normal Admin) */}
+            {authCategory === "admin" && (
+              <>
+                <h2>
+                  {authAdminType === "root" ? "👑 Root Admin Sign In" : authMode === "login" ? "🛡️ Normal Admin Sign In" : "🛡️ Register Normal Admin"}
+                </h2>
+                <div className="auth-admin-subtabs">
+                  <button
+                    type="button"
+                    className={authAdminType === "root" ? "active" : ""}
+                    onClick={() => {
+                      setAuthAdminType("root");
+                      setAuthMode("login");
+                    }}
+                  >
+                    👑 Root Admin
+                  </button>
+                  <button
+                    type="button"
+                    className={authAdminType === "normal" ? "active" : ""}
+                    onClick={() => setAuthAdminType("normal")}
+                  >
+                    🛡️ Normal Admin
+                  </button>
+                </div>
+                {authAdminType === "root" ? (
+                  <div className="auth-admin-banner">
+                    ⚡ <b>Root Admin Authority:</b> Single root administrator with master permissions to approve and manage all normal administrators.
+                  </div>
+                ) : (
+                  <>
+                    <div className="auth-admin-banner">
+                      🛡️ <b>Normal Admin:</b> Manages orders, restaurants, customers, and delivery partners. Requires Root Admin approval.
+                    </div>
+                    <div className="auth-tabs" style={{ marginBottom: 12 }}>
+                      <button type="button" className={authMode === "login" ? "active" : ""} onClick={() => setAuthMode("login")}>Admin Sign in</button>
+                      <button type="button" className={authMode === "register" ? "active" : ""} onClick={() => setAuthMode("register")}>Register Admin</button>
+                    </div>
+                  </>
+                )}
+              </>
+            )}
+
             {authMode === "register" && (
               <>
                 <label>Name<input name="name" minLength="2" maxLength="60" required /></label>
                 <label>Phone<input name="phone" minLength="10" maxLength="15" required /></label>
-                {authRole === "customer" && (
+                {authRole === "customer" && authCategory === "non_admin" && (
                   <label>Referral Code (Optional)<input name="referralCode" placeholder="e.g. THA1B2" maxLength="12" /></label>
                 )}
-
-        
-                {authRole === "delivery_partner" && (
+                {authRole === "delivery_partner" && authCategory === "non_admin" && (
                   <p className="muted">Partner access starts after admin approval. GPS is shared only after you start it for an active delivery.</p>
                 )}
-
-        
-                {authRole === "kitchen_owner" && (
+                {authRole === "kitchen_owner" && authCategory === "non_admin" && (
                   <p className="muted">Kitchen owner portal. Manage dish stocks, open/close status, and live incoming orders.</p>
                 )}
-
-        
+                {authCategory === "admin" && (
+                  <p className="muted" style={{ color: "#c2410c", fontWeight: 700 }}>
+                    ⚠️ New Administrator accounts require verification and approval by the Root Admin before access is granted.
+                  </p>
+                )}
               </>
             )}
 
-        
             <label>Email<input name="email" type="email" required /></label>
             <label>Password<input name="password" type="password" minLength="8" required /></label>
             <button className="checkout" type="submit">
-              {authMode === "login" ? "Sign in" : "Create account"}
+              {authMode === "login" ? "Sign in" : authCategory === "admin" ? "Submit Admin Application" : "Create account"}
             </button>
           </form>
         </div>
@@ -1903,6 +2087,33 @@ function App() {
               >
                 Live Orders ({adminOrders.length})
               </button>
+              <button
+                type="button"
+                className={`admin-nav-tab ${adminActiveTab === "users" ? "active" : ""}`}
+                onClick={() => {
+                  setAdminActiveTab("users");
+                  api("/api/admin/users").then(setAdminUsersList).catch(() => {});
+                }}
+              >
+                👥 Users Directory ({adminUsersList.length})
+              </button>
+              {user?.isRootAdmin && (
+                <button
+                  type="button"
+                  className={`admin-nav-tab ${adminActiveTab === "root-console" ? "active" : ""}`}
+                  style={{
+                    background: adminActiveTab === "root-console" ? "#9d174d" : "#fdf2f8",
+                    color: adminActiveTab === "root-console" ? "#ffffff" : "#9d174d",
+                    borderColor: "#f472b6"
+                  }}
+                  onClick={() => {
+                    setAdminActiveTab("root-console");
+                    api("/api/admin/admins").then((d) => setAdminAdminsList(d.admins || [])).catch(() => {});
+                  }}
+                >
+                  👑 Root Admin Console
+                </button>
+              )}
               <button
                 type="button"
                 className={`admin-nav-tab ${adminActiveTab === "applications" ? "active" : ""}`}
@@ -1958,6 +2169,212 @@ function App() {
 
             {adminStreamError && (
               <p className="admin-stream-error" role="alert">{adminStreamError}</p>
+            )}
+
+            {/* TAB: Users & Partners Directory */}
+            {adminActiveTab === "users" && (
+              <div className="admin-form-card" style={{ marginTop: 14 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10, marginBottom: 14 }}>
+                  <div>
+                    <h3 style={{ margin: 0, fontSize: 16, fontWeight: 800 }}>👥 Users & Partners Directory</h3>
+                    <p className="muted" style={{ margin: "2px 0 0", fontSize: 12 }}>
+                      View complete registered profiles of customers, delivery partners, and kitchen owners
+                    </p>
+                  </div>
+                  <div style={{ display: "flex", gap: 6 }}>
+                    {["all", "customer", "delivery_partner", "kitchen_owner"].map((f) => (
+                      <button
+                        type="button"
+                        key={f}
+                        style={{
+                          padding: "6px 12px",
+                          borderRadius: 8,
+                          fontSize: 11,
+                          fontWeight: 700,
+                          border: "1px solid #cbd5e1",
+                          background: adminUserFilter === f ? "#ea580c" : "#f8fafc",
+                          color: adminUserFilter === f ? "#fff" : "#475569",
+                          cursor: "pointer"
+                        }}
+                        onClick={() => setAdminUserFilter(f)}
+                      >
+                        {f === "all" ? "All Users" : f === "customer" ? "Customers" : f === "delivery_partner" ? "Delivery Partners" : "Kitchen Owners"}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {adminUsersList.length === 0 ? (
+                  <p className="muted">No users found.</p>
+                ) : (
+                  adminUsersList
+                    .filter((u) => adminUserFilter === "all" || u.role === adminUserFilter)
+                    .map((u) => (
+                      <div key={u._id} className="admin-user-card">
+                        <div className="admin-user-header">
+                          <div className="admin-user-info">
+                            {u.avatar ? (
+                              <img src={u.avatar} alt="" className="admin-user-avatar" />
+                            ) : (
+                              <span className="admin-user-avatar">{u.name?.charAt(0).toUpperCase() || "U"}</span>
+                            )}
+                            <div>
+                              <strong style={{ fontSize: 14, color: "#0f172a" }}>{u.name}</strong>
+                              <div style={{ fontSize: 12, color: "#64748b" }}>{u.email} {u.phone && `· ${u.phone}`}</div>
+                            </div>
+                          </div>
+                          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                            <span className={`admin-user-badge ${u.role === "customer" ? "badge-customer" : u.role === "delivery_partner" ? "badge-partner" : "badge-kitchen"}`}>
+                              {u.role === "customer" ? "👤 Customer" : u.role === "delivery_partner" ? "🛵 Delivery Rider" : "🍳 Kitchen Owner"}
+                            </span>
+                            <span style={{ fontSize: 11, fontWeight: 700, color: u.isApproved ? "#059669" : "#c2410c" }}>
+                              {u.isApproved ? "✅ Approved" : "⏳ Pending Approval"}
+                            </span>
+                            {!u.isApproved && (
+                              <button
+                                type="button"
+                                style={{ padding: "4px 10px", background: "#059669", color: "#fff", border: 0, borderRadius: 6, fontSize: 11, fontWeight: 800, cursor: "pointer" }}
+                                onClick={() => approveUser(u._id)}
+                              >
+                                Approve
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              style={{ padding: "4px 10px", background: "#f1f5f9", color: "#334155", border: "1px solid #cbd5e1", borderRadius: 6, fontSize: 11, fontWeight: 700, cursor: "pointer" }}
+                              onClick={() => toggleUserStatus(u._id)}
+                            >
+                              {u.isAvailable !== false ? "Active" : "Disabled"}
+                            </button>
+                          </div>
+                        </div>
+
+                        <div className="admin-user-details">
+                          <div><b>Wallet Balance:</b> ₹{u.walletBalance || 0}</div>
+                          <div><b>Dietary:</b> {u.dietaryPreference || "All"}</div>
+                          <div><b>Gender:</b> {u.gender || "N/A"}</div>
+                          <div><b>DOB:</b> {u.dateOfBirth || "N/A"}</div>
+                          {u.bio && <div style={{ gridColumn: "1 / -1" }}><b>Bio:</b> “{u.bio}”</div>}
+                          <div style={{ gridColumn: "1 / -1" }}>
+                            <b>Addresses ({(u.addresses || []).length}):</b>{" "}
+                            {(u.addresses || []).length === 0
+                              ? "None saved"
+                              : u.addresses.map((a) => `${a.label}: ${a.address}`).join(" | ")}
+                          </div>
+                        </div>
+                      </div>
+                    ))
+                )}
+              </div>
+            )}
+
+            {/* TAB: Root Admin Console */}
+            {adminActiveTab === "root-console" && user?.isRootAdmin && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 16, marginTop: 14 }}>
+                <div style={{ background: "#fdf2f8", border: "1px solid #f472b6", borderRadius: 12, padding: "14px 18px", color: "#831843" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 15, fontWeight: 800, marginBottom: 4 }}>
+                    <span>👑</span>
+                    <span>Root Administrator Master Console</span>
+                  </div>
+                  <p style={{ margin: 0, fontSize: 12.5, lineHeight: 1.5 }}>
+                    You hold <b>exclusive Root Admin authority</b>. Only you can authorize, create, and revoke administrator accounts. Normal administrators cannot add other admins or access this console.
+                  </p>
+                </div>
+
+                {/* Admins List */}
+                <div className="admin-form-card">
+                  <h3 style={{ margin: "0 0 12px", fontSize: 15, fontWeight: 800 }}>System Administrators ({adminAdminsList.length})</h3>
+                  {adminAdminsList.map((adm) => (
+                    <div key={adm._id} className="admin-user-card" style={{ borderLeft: adm.isRootAdmin ? "4px solid #db2777" : "4px solid #ea580c" }}>
+                      <div className="admin-user-header">
+                        <div className="admin-user-info">
+                          <span className="admin-user-avatar" style={{ background: adm.isRootAdmin ? "#be185d" : "#ea580c" }}>
+                            {adm.isRootAdmin ? "👑" : "🛡️"}
+                          </span>
+                          <div>
+                            <strong style={{ fontSize: 14 }}>{adm.name}</strong>
+                            <div style={{ fontSize: 12, color: "#64748b" }}>{adm.email} {adm.phone && `· ${adm.phone}`}</div>
+                          </div>
+                        </div>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                          <span className={`admin-user-badge ${adm.isRootAdmin ? "badge-root" : "badge-admin"}`}>
+                            {adm.isRootAdmin ? "👑 ROOT ADMIN (System Owner)" : "🛡️ Admin"}
+                          </span>
+                          <span style={{ fontSize: 11, fontWeight: 700, color: adm.isApproved ? "#059669" : "#c2410c" }}>
+                            {adm.isApproved ? "✅ Approved" : "⏳ Pending Root Approval"}
+                          </span>
+                          {!adm.isApproved && (
+                            <button
+                              type="button"
+                              style={{ padding: "4px 10px", background: "#059669", color: "#fff", border: 0, borderRadius: 6, fontSize: 11, fontWeight: 800, cursor: "pointer" }}
+                              onClick={() => approveAdmin(adm._id)}
+                            >
+                              Approve Admin
+                            </button>
+                          )}
+                          {!adm.isRootAdmin && (
+                            <button
+                              type="button"
+                              style={{ padding: "4px 10px", background: "#fee2e2", color: "#991b1b", border: "1px solid #fca5a5", borderRadius: 6, fontSize: 11, fontWeight: 700, cursor: "pointer" }}
+                              onClick={() => revokeAdmin(adm._id)}
+                            >
+                              Revoke Admin
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Provision New Admin Form */}
+                <form className="admin-form-card" onSubmit={createAdmin}>
+                  <h3 style={{ margin: "0 0 12px", fontSize: 15, fontWeight: 800 }}>Directly Assign / Authorize New Administrator</h3>
+                  <div className="admin-form-grid">
+                    <div>
+                      <label>Full Name *</label>
+                      <input
+                        required
+                        placeholder="e.g. Ananya Sen"
+                        value={newAdminName}
+                        onChange={(e) => setNewAdminName(e.target.value)}
+                      />
+                    </div>
+                    <div>
+                      <label>Email Address *</label>
+                      <input
+                        required
+                        type="email"
+                        placeholder="e.g. ananya.admin@truehomes.local"
+                        value={newAdminEmail}
+                        onChange={(e) => setNewAdminEmail(e.target.value)}
+                      />
+                    </div>
+                    <div>
+                      <label>Phone Number *</label>
+                      <input
+                        required
+                        placeholder="e.g. +91 9876543210"
+                        value={newAdminPhone}
+                        onChange={(e) => setNewAdminPhone(e.target.value)}
+                      />
+                    </div>
+                    <div>
+                      <label>Initial Password *</label>
+                      <input
+                        required
+                        type="password"
+                        placeholder="Min 8 characters"
+                        value={newAdminPassword}
+                        onChange={(e) => setNewAdminPassword(e.target.value)}
+                      />
+                    </div>
+                  </div>
+                  <button type="submit" className="checkout" style={{ width: "auto", padding: "10px 24px", marginTop: 12 }}>
+                    Authorise New Administrator
+                  </button>
+                </form>
+              </div>
             )}
 
         
@@ -3264,6 +3681,12 @@ function App() {
               </div>
             </div>
 
+            {hasActiveTransaction && (
+              <div className="profile-active-order-lock" style={{ margin: "12px 0 6px" }}>
+                🔒 <b>Profile & Address Updates Locked:</b> You currently have an active order or delivery transaction running. Profile and address modifications are temporarily locked until delivery is completed.
+              </div>
+            )}
+
             {/* Navigation Tabs (Zomato/Swiggy style) */}
             <div className="profile-nav-tabs">
               <button
@@ -3476,8 +3899,13 @@ function App() {
                 </div>
 
                 <div style={{ display: "flex", gap: 10 }}>
-                  <button type="submit" className="partner-action" style={{ flex: 1, padding: "10px 20px" }}>
-                    💾 Save Profile Changes
+                  <button
+                    type="submit"
+                    className="partner-action"
+                    style={{ flex: 1, padding: "10px 20px", opacity: hasActiveTransaction ? 0.6 : 1 }}
+                    disabled={hasActiveTransaction}
+                  >
+                    {hasActiveTransaction ? "🔒 Locked during active order" : "💾 Save Profile Changes"}
                   </button>
                   <button
                     type="button"
@@ -3622,8 +4050,13 @@ function App() {
                       required
                     />
                   </div>
-                  <button type="submit" className="partner-action" style={{ padding: "6px 18px", fontSize: 12 }}>
-                    + Save Address
+                  <button
+                    type="submit"
+                    className="partner-action"
+                    style={{ padding: "6px 18px", fontSize: 12, opacity: hasActiveTransaction ? 0.6 : 1 }}
+                    disabled={hasActiveTransaction}
+                  >
+                    {hasActiveTransaction ? "🔒 Locked" : "+ Save Address"}
                   </button>
                 </form>
               </div>

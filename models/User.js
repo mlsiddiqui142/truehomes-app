@@ -26,6 +26,7 @@ const userSchema = new mongoose.Schema(
     ],
     passwordHash: { type: String, required: true, select: false },
     role: { type: String, enum: ['customer', 'admin', 'delivery_partner', 'kitchen_owner'], default: 'customer' },
+    isRootAdmin: { type: Boolean, default: false },
     isApproved: { type: Boolean, default: false },
     isAvailable: { type: Boolean, default: true },
     walletBalance: { type: Number, default: 0, min: 0 },

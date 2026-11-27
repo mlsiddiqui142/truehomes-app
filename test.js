@@ -22,6 +22,7 @@ const customerEmail = `customer_${runId}@truehomes.test`;
 const kitchenOwnerEmail = `kitchen_${runId}@truehomes.test`;
 const refereeEmail = `referee_${runId}@truehomes.test`;
 const partnerEmails = Array.from({ length: 10 }, (_, index) => `partner${index + 1}_${runId}@truehomes.test`);
+const normalAdminEmail = `normadmin_${runId}@truehomes.test`;
 const strongPassword = 'TestPassword@2026';
 
 let serverProc;
@@ -70,7 +71,7 @@ describe('TrueHomes Full-Stack & Cyber-Security Automated Suite', () => {
     if (serverProc && !serverProc.killed) {
       serverProc.kill('SIGTERM');
     }
-    const cleanupEmails = [customerEmail, kitchenOwnerEmail, refereeEmail, ...partnerEmails];
+    const cleanupEmails = [customerEmail, kitchenOwnerEmail, refereeEmail, normalAdminEmail, ...partnerEmails];
     if (createdAdminDuringTest) cleanupEmails.push(adminEmail);
     const cleanupUsers = await User.find({ email: { $in: cleanupEmails } }).select('_id').lean();
     const cleanupUserIds = cleanupUsers.map((user) => user._id);
@@ -174,10 +175,14 @@ describe('TrueHomes Full-Stack & Cyber-Security Automated Suite', () => {
       assert.equal(regData.user.role, 'admin');
       adminToken = regData.token;
     } else {
-      const adminDoc = await User.findOne({ email: adminEmail });
+      const adminDoc = await User.findOneAndUpdate(
+        { email: adminEmail },
+        { isRootAdmin: true, isApproved: true },
+        { new: true }
+      );
       const jwt = require('jsonwebtoken');
       adminToken = jwt.sign(
-        { sub: adminDoc._id.toString(), role: 'admin' },
+        { sub: adminDoc._id.toString(), role: 'admin', isRootAdmin: true },
         process.env.JWT_SECRET,
         { algorithm: 'HS256', expiresIn: '1h' }
       );
@@ -975,6 +980,15 @@ describe('TrueHomes Full-Stack & Cyber-Security Automated Suite', () => {
   });
 
   it('22. Customer Profile & Address Management and Rider Availability Toggle', async () => {
+    // Ensure no leftover active fixture orders from earlier tests block profile editing
+    const custDoc = await User.findOne({ email: customerEmail }).select('_id');
+    if (custDoc) {
+      await Order.updateMany(
+        { userId: custDoc._id, status: { $in: ['PLACED', 'CONFIRMED', 'PREPARING', 'OUT_FOR_DELIVERY'] } },
+        { status: 'DELIVERED' }
+      );
+    }
+
     // 1. Update customer profile details (name, phone, avatar, bio, dietaryPreference, dateOfBirth, gender)
     const profRes = await fetch(`${BASE_URL}/api/user/profile`, {
       method: 'PATCH',
@@ -1539,5 +1553,128 @@ describe('TrueHomes Full-Stack & Cyber-Security Automated Suite', () => {
     const updatedUser = await User.findOne({ email: customerEmail }).select('pushSubscription');
     assert.ok(updatedUser.pushSubscription);
     assert.equal(updatedUser.pushSubscription.endpoint, 'https://fcm.googleapis.com/fcm/send/test-sub-endpoint');
+  });
+
+  it('28. Root Admin authority vs Normal Admin, User Directory, and Profile Edit Lock during active orders', async () => {
+    const testIp = '198.51.100.55';
+    // 1. Verify Root Admin can create a Normal Admin
+    const createAdmRes = await fetch(`${BASE_URL}/api/admin/admins`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken}`, 'X-Forwarded-For': testIp },
+      body: JSON.stringify({
+        name: 'Normal Admin User',
+        email: normalAdminEmail,
+        phone: '+91 9888877777',
+        password: strongPassword
+      })
+    });
+    assert.equal(createAdmRes.status, 201);
+    const createAdmData = await createAdmRes.json();
+    assert.equal(createAdmData.admin.role, 'admin');
+    assert.equal(createAdmData.admin.isRootAdmin, false);
+
+    // 2. Normal admin logs in and gets JWT
+    const normLoginRes = await fetch(`${BASE_URL}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': testIp },
+      body: JSON.stringify({ email: normalAdminEmail, password: strongPassword, role: 'admin' })
+    });
+    assert.equal(normLoginRes.status, 200);
+    const normLoginData = await normLoginRes.json();
+    assert.equal(normLoginData.user.isRootAdmin, false);
+    const normalAdminToken = normLoginData.token;
+
+    // 3. Normal Admin attempts to create another admin -> 403 Forbidden (Root Admin only)
+    const unauthorizedAdmRes = await fetch(`${BASE_URL}/api/admin/admins`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${normalAdminToken}`, 'X-Forwarded-For': testIp },
+      body: JSON.stringify({
+        name: 'Illegal Admin',
+        email: `illegal_${runId}@truehomes.test`,
+        password: strongPassword
+      })
+    });
+    assert.equal(unauthorizedAdmRes.status, 403);
+
+    // 4. Normal Admin CAN access Users Directory and inspect customer/delivery/kitchen details
+    const usersDirRes = await fetch(`${BASE_URL}/api/admin/users`, {
+      headers: { Authorization: `Bearer ${normalAdminToken}`, 'X-Forwarded-For': testIp }
+    });
+    assert.equal(usersDirRes.status, 200);
+    const usersDirData = await usersDirRes.json();
+    assert.ok(Array.isArray(usersDirData));
+    assert.ok(usersDirData.some((u) => u.email === customerEmail));
+
+    // 5. Active order profile edit lock:
+    const orderRes = await fetch(`${BASE_URL}/api/orders`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${customerToken}`, 'X-Forwarded-For': testIp },
+      body: JSON.stringify({
+        restaurantId: createdRestaurantId,
+        items: [{ menuItemId: createdMenuItemId, qty: 1 }],
+        customerName: 'Customer Test',
+        customerPhone: '+91 9876543210',
+        deliveryAddress: 'Flat 101, Test Residency, Sector 62',
+        paymentMethod: 'COD'
+      })
+    });
+    assert.equal(orderRes.status, 201);
+    const activeOrderData = await orderRes.json();
+    const activeOrderCode = activeOrderData.orderCode;
+
+    // While order is active (PLACED), customer attempts to update profile -> 400 Bad Request
+    const lockedProfileRes = await fetch(`${BASE_URL}/api/user/profile`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${customerToken}`, 'X-Forwarded-For': testIp },
+      body: JSON.stringify({ name: 'Attempted Name Change' })
+    });
+    assert.equal(lockedProfileRes.status, 400);
+    const lockedProfileData = await lockedProfileRes.json();
+    assert.match(lockedProfileData.error, /active order or delivery/i);
+
+    // Customer attempts to modify address -> 400 Bad Request
+    const lockedAddressRes = await fetch(`${BASE_URL}/api/user/addresses`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${customerToken}`, 'X-Forwarded-For': testIp },
+      body: JSON.stringify({ label: 'Office', address: 'Block B, Active Order St' })
+    });
+    assert.equal(lockedAddressRes.status, 400);
+
+    // Customer cancels order (completing the active transaction)
+    const cancelRes = await fetch(`${BASE_URL}/api/orders/${activeOrderCode}/cancel`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${customerToken}`, 'X-Forwarded-For': testIp },
+      body: JSON.stringify({ reason: 'Test unlock' })
+    });
+    assert.equal(cancelRes.status, 200);
+
+    // Ensure no other active orders exist for customer
+    const custDoc = await User.findOne({ email: customerEmail }).select('_id');
+    if (custDoc) {
+      await Order.updateMany(
+        { userId: custDoc._id, status: { $in: ['PLACED', 'CONFIRMED', 'PREPARING', 'OUT_FOR_DELIVERY'] } },
+        { status: 'DELIVERED' }
+      );
+    }
+
+    // After order completes, profile update succeeds!
+    const unlockedProfileRes = await fetch(`${BASE_URL}/api/user/profile`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${customerToken}`, 'X-Forwarded-For': testIp },
+      body: JSON.stringify({ name: 'Customer Post Delivery' })
+    });
+    assert.equal(unlockedProfileRes.status, 200);
+    const unlockedData = await unlockedProfileRes.json();
+    assert.equal(unlockedData.name, 'Customer Post Delivery');
+
+    // Clean up test order
+    await Order.deleteOne({ orderCode: activeOrderCode });
+
+    // 6. Root Admin can revoke Normal Admin
+    const revokeAdmRes = await fetch(`${BASE_URL}/api/admin/admins/${createAdmData.admin._id}/revoke`, {
+      method: 'PATCH',
+      headers: { Authorization: `Bearer ${adminToken}`, 'X-Forwarded-For': testIp }
+    });
+    assert.equal(revokeAdmRes.status, 200);
   });
 });

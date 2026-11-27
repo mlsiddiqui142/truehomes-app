@@ -271,7 +271,12 @@ const DUMMY_HASH = '$2a$12$abcdefghijklmnopqrstuuABCDEFGHIJKLMNOPQRSTUVWXYZ01234
 
 function signUserToken(user) {
   return jwt.sign(
-    { sub: user._id.toString(), role: user.role, name: user.name },
+    {
+      sub: user._id.toString(),
+      role: user.role,
+      name: user.name,
+      isRootAdmin: Boolean(user.isRootAdmin)
+    },
     process.env.JWT_SECRET,
     { algorithm: 'HS256', expiresIn: '15m' }
   );
@@ -332,7 +337,12 @@ function requireAuth(req, res, next) {
   }
   try {
     const payload = jwt.verify(authHeader.slice(7), process.env.JWT_SECRET, { algorithms: ['HS256'] });
-    req.user = { id: payload.sub, role: payload.role, name: payload.name };
+    req.user = {
+      id: payload.sub,
+      role: payload.role,
+      name: payload.name,
+      isRootAdmin: Boolean(payload.isRootAdmin)
+    };
     return next();
   } catch (err) {
     return res.status(401).json({ error: 'Invalid or expired session token' });
@@ -344,7 +354,12 @@ function optionalAuth(req, res, next) {
   if (authHeader && authHeader.startsWith('Bearer ')) {
     try {
       const payload = jwt.verify(authHeader.slice(7), process.env.JWT_SECRET, { algorithms: ['HS256'] });
-      req.user = { id: payload.sub, role: payload.role, name: payload.name };
+      req.user = {
+        id: payload.sub,
+        role: payload.role,
+        name: payload.name,
+        isRootAdmin: Boolean(payload.isRootAdmin)
+      };
     } catch (_) {}
   }
   return next();
@@ -355,6 +370,49 @@ function requireAdmin(req, res, next) {
     return res.status(403).json({ error: 'Admin privileges required' });
   }
   return next();
+}
+
+async function requireRootAdmin(req, res, next) {
+  if (!req.user || req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Root Admin privileges required' });
+  }
+  if (req.user.isRootAdmin) return next();
+  try {
+    const dbUser = await User.findById(req.user.id).select('role isRootAdmin').lean();
+    if (dbUser && dbUser.role === 'admin' && dbUser.isRootAdmin) {
+      req.user.isRootAdmin = true;
+      return next();
+    }
+    return res.status(403).json({ error: 'Root Admin privileges required' });
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to verify Root Admin access' });
+  }
+}
+
+async function hasActiveTransaction(userId, role) {
+  try {
+    const activeOrderStatuses = ['PLACED', 'CONFIRMED', 'PREPARING', 'OUT_FOR_DELIVERY', 'placed', 'confirmed', 'preparing', 'out_for_delivery'];
+    const activePartnerStatuses = ['CONFIRMED', 'PREPARING', 'OUT_FOR_DELIVERY', 'confirmed', 'preparing', 'out_for_delivery'];
+    if (role === 'customer') {
+      const active = await Order.findOne({ userId, status: { $in: activeOrderStatuses } }).select('_id').lean();
+      return Boolean(active);
+    }
+    if (role === 'delivery_partner') {
+      const active = await Order.findOne({ assignedPartnerId: userId, status: { $in: activePartnerStatuses } }).select('_id').lean();
+      return Boolean(active);
+    }
+    if (role === 'kitchen_owner') {
+      const kitchens = await Restaurant.find({ ownerId: userId }).select('_id').lean();
+      const kitchenIds = kitchens.map((k) => k._id);
+      if (kitchenIds.length > 0) {
+        const active = await Order.findOne({ restaurantId: { $in: kitchenIds }, status: { $in: activeOrderStatuses } }).select('_id').lean();
+        return Boolean(active);
+      }
+    }
+    return false;
+  } catch (_) {
+    return false;
+  }
 }
 
 function requireDeliveryPartner(req, res, next) {
@@ -463,15 +521,32 @@ app.post('/api/auth/register', authLimiter, async (req, res) => {
       return res.status(409).json({ error: 'An account with this email already exists' });
     }
 
-    const isAdminEmail =
-      process.env.ADMIN_EMAIL &&
-      email === process.env.ADMIN_EMAIL.trim().toLowerCase();
+    const isRootEmail =
+      (process.env.ROOT_ADMIN_EMAIL && email === process.env.ROOT_ADMIN_EMAIL.trim().toLowerCase()) ||
+      (process.env.ADMIN_EMAIL && email === process.env.ADMIN_EMAIL.trim().toLowerCase());
 
-    const assignedRole = isAdminEmail
-      ? 'admin'
-      : (req.body.role === 'delivery_partner'
-          ? 'delivery_partner'
-          : (req.body.role === 'kitchen_owner' ? 'kitchen_owner' : 'customer'));
+    let assignedRole = 'customer';
+    let isRootAdmin = false;
+    let isApproved = true;
+
+    if (isRootEmail) {
+      assignedRole = 'admin';
+      isRootAdmin = true;
+      isApproved = true;
+    } else if (req.body.role === 'admin') {
+      assignedRole = 'admin';
+      isRootAdmin = false;
+      isApproved = false;
+    } else if (req.body.role === 'delivery_partner') {
+      assignedRole = 'delivery_partner';
+      isApproved = false;
+    } else if (req.body.role === 'kitchen_owner') {
+      assignedRole = 'kitchen_owner';
+      isApproved = true;
+    } else {
+      assignedRole = 'customer';
+      isApproved = true;
+    }
 
     const referralCode = 'TH' + crypto.randomBytes(3).toString('hex').toUpperCase();
     let referredBy = null;
@@ -487,15 +562,23 @@ app.post('/api/auth/register', authLimiter, async (req, res) => {
       phone,
       passwordHash,
       role: assignedRole,
-      isApproved: assignedRole !== 'delivery_partner',
+      isRootAdmin,
+      isApproved,
       referralCode,
       referredBy
     });
-    if (assignedRole === 'delivery_partner') {
+    if (assignedRole === 'delivery_partner' && !isApproved) {
       return res.status(202).json({
         pendingApproval: true,
         message: 'Delivery partner application submitted. Admin approval is required before sign in.',
-        user: { id: user._id, name: user.name, email: user.email, phone: user.phone, role: user.role }
+        user: { id: user._id, name: user.name, email: user.email, phone: user.phone, role: user.role, isRootAdmin: false }
+      });
+    }
+    if (assignedRole === 'admin' && !isApproved) {
+      return res.status(202).json({
+        pendingApproval: true,
+        message: 'Admin application submitted. Root Admin approval is required before sign in.',
+        user: { id: user._id, name: user.name, email: user.email, phone: user.phone, role: user.role, isRootAdmin: false }
       });
     }
     const token = signUserToken(user);
@@ -503,7 +586,14 @@ app.post('/api/auth/register', authLimiter, async (req, res) => {
 
     return res.status(201).json({
       token,
-      user: { id: user._id, name: user.name, email: user.email, phone: user.phone, role: user.role }
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        phone: user.phone,
+        role: user.role,
+        isRootAdmin: Boolean(user.isRootAdmin)
+      }
     });
   } catch (err) {
     if (err.code === 11000) {
@@ -531,6 +621,9 @@ app.post('/api/auth/login', authLimiter, async (req, res) => {
     if (user.role === 'delivery_partner' && !user.isApproved) {
       return res.status(403).json({ error: 'Delivery partner account is awaiting admin approval' });
     }
+    if (user.role === 'admin' && !user.isApproved && !user.isRootAdmin) {
+      return res.status(403).json({ error: 'Admin account is awaiting Root Admin approval' });
+    }
     if (typeof req.body.role === 'string' &&
         ['customer', 'admin', 'delivery_partner'].includes(req.body.role) &&
         req.body.role !== user.role) {
@@ -541,7 +634,14 @@ app.post('/api/auth/login', authLimiter, async (req, res) => {
     await createRefreshSession(res, user);
     return res.status(200).json({
       token,
-      user: { id: user._id, name: user.name, email: user.email, phone: user.phone, role: user.role }
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        phone: user.phone,
+        role: user.role,
+        isRootAdmin: Boolean(user.isRootAdmin)
+      }
     });
   } catch (err) {
     return res.status(500).json({ error: 'Authentication failed' });
@@ -572,12 +672,22 @@ app.post('/api/auth/direct-login', authLimiter, async (req, res) => {
     if (user.role === 'delivery_partner' && !user.isApproved) {
       return res.status(403).json({ error: 'Delivery partner account is awaiting admin approval' });
     }
+    if (user.role === 'admin' && !user.isApproved && !user.isRootAdmin) {
+      return res.status(403).json({ error: 'Admin account is awaiting Root Admin approval' });
+    }
 
     const token = signUserToken(user);
     await createRefreshSession(res, user);
     return res.status(200).json({
       token,
-      user: { id: user._id, name: user.name, email: user.email, phone: user.phone, role: user.role }
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        phone: user.phone,
+        role: user.role,
+        isRootAdmin: Boolean(user.isRootAdmin)
+      }
     });
   } catch (err) {
     return res.status(500).json({ error: 'Direct login failed' });
@@ -600,6 +710,8 @@ app.get('/api/auth/me', requireAuth, async (req, res) => {
       dateOfBirth: user.dateOfBirth || '',
       gender: user.gender || 'prefer_not_to_say',
       role: user.role,
+      isRootAdmin: Boolean(user.isRootAdmin),
+      isApproved: user.isApproved !== false,
       walletBalance: user.walletBalance || 0,
       isAvailable: user.isAvailable !== false,
       addresses: user.addresses || []
@@ -612,6 +724,11 @@ app.get('/api/auth/me', requireAuth, async (req, res) => {
 // PATCH /api/user/profile — update profile details (photo, name, phone, bio, dietary preferences, dob, gender)
 app.patch('/api/user/profile', requireAuth, async (req, res) => {
   try {
+    const isBusy = await hasActiveTransaction(req.user.id, req.user.role);
+    if (isBusy) {
+      return res.status(400).json({ error: 'Cannot update profile while an active order or delivery transaction is in progress' });
+    }
+
     const { name, phone, avatar, bio, dietaryPreference, dateOfBirth, gender } = req.body;
     const user = await User.findById(req.user.id);
     if (!user) return res.status(404).json({ error: 'User not found' });
@@ -650,6 +767,7 @@ app.patch('/api/user/profile', requireAuth, async (req, res) => {
       dateOfBirth: user.dateOfBirth || '',
       gender: user.gender || 'prefer_not_to_say',
       role: user.role,
+      isRootAdmin: Boolean(user.isRootAdmin),
       walletBalance: user.walletBalance || 0,
       isAvailable: user.isAvailable !== false,
       addresses: user.addresses || []
@@ -662,6 +780,11 @@ app.patch('/api/user/profile', requireAuth, async (req, res) => {
 // POST /api/user/addresses — save a new address
 app.post('/api/user/addresses', requireAuth, async (req, res) => {
   try {
+    const isBusy = await hasActiveTransaction(req.user.id, req.user.role);
+    if (isBusy) {
+      return res.status(400).json({ error: 'Cannot modify addresses while an active order or delivery transaction is in progress' });
+    }
+
     const { label = 'Home', address } = req.body;
     if (!address || typeof address !== 'string' || address.trim().length < 5) {
       return res.status(400).json({ error: 'Valid delivery address (5+ characters) is required' });
@@ -683,6 +806,11 @@ app.post('/api/user/addresses', requireAuth, async (req, res) => {
 // PUT /api/user/addresses/:addressId — update an existing saved address
 app.put('/api/user/addresses/:addressId', requireAuth, async (req, res) => {
   try {
+    const isBusy = await hasActiveTransaction(req.user.id, req.user.role);
+    if (isBusy) {
+      return res.status(400).json({ error: 'Cannot modify addresses while an active order or delivery transaction is in progress' });
+    }
+
     const { label = 'Home', address } = req.body;
     if (!address || typeof address !== 'string' || address.trim().length < 5) {
       return res.status(400).json({ error: 'Valid delivery address (5+ characters) is required' });
@@ -709,6 +837,11 @@ app.put('/api/user/addresses/:addressId', requireAuth, async (req, res) => {
 // DELETE /api/user/addresses/:addressId — remove a saved address
 app.delete('/api/user/addresses/:addressId', requireAuth, async (req, res) => {
   try {
+    const isBusy = await hasActiveTransaction(req.user.id, req.user.role);
+    if (isBusy) {
+      return res.status(400).json({ error: 'Cannot modify addresses while an active order or delivery transaction is in progress' });
+    }
+
     const user = await User.findById(req.user.id);
     if (!user) return res.status(404).json({ error: 'User not found' });
 
@@ -1425,6 +1558,167 @@ app.patch('/api/admin/delivery-partners/:id/approve', requireAuth, requireAdmin,
     return res.json(partner);
   } catch (err) {
     return res.status(500).json({ error: 'Failed to approve delivery partner' });
+  }
+});
+
+// GET /api/admin/users — View all registered customers, delivery partners, and kitchen owners with full profile info
+app.get('/api/admin/users', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const { role } = req.query;
+    const filter = {};
+    if (role && ['customer', 'delivery_partner', 'kitchen_owner'].includes(role)) {
+      filter.role = role;
+    } else {
+      filter.role = { $in: ['customer', 'delivery_partner', 'kitchen_owner'] };
+    }
+    const users = await User.find(filter)
+      .select('-passwordHash')
+      .sort({ createdAt: -1 })
+      .lean();
+    return res.json(users);
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to load users' });
+  }
+});
+
+// PATCH /api/admin/users/:id/approve — Admin approves a customer, delivery partner, or kitchen owner
+app.patch('/api/admin/users/:id/approve', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ error: 'Invalid user ID' });
+    }
+    const targetUser = await User.findById(req.params.id);
+    if (!targetUser) return res.status(404).json({ error: 'User not found' });
+    if (targetUser.role === 'admin') {
+      return res.status(403).json({ error: 'Only Root Admin can approve administrators' });
+    }
+    targetUser.isApproved = true;
+    await targetUser.save();
+    return res.json({ message: `${targetUser.name} (${targetUser.role}) has been approved`, user: targetUser });
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to approve user' });
+  }
+});
+
+// PATCH /api/admin/users/:id/status — Admin toggles active status for a user
+app.patch('/api/admin/users/:id/status', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ error: 'Invalid user ID' });
+    }
+    const targetUser = await User.findById(req.params.id);
+    if (!targetUser) return res.status(404).json({ error: 'User not found' });
+    if (targetUser.role === 'admin' && !req.user.isRootAdmin) {
+      return res.status(403).json({ error: 'Only Root Admin can modify administrator status' });
+    }
+    targetUser.isAvailable = req.body.isAvailable !== undefined ? Boolean(req.body.isAvailable) : !targetUser.isAvailable;
+    await targetUser.save();
+    return res.json({ message: `Status updated for ${targetUser.name}`, user: targetUser });
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to update user status' });
+  }
+});
+
+// GET /api/admin/admins — List all administrators with Root Admin and Normal Admin distinction
+app.get('/api/admin/admins', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const admins = await User.find({ role: 'admin' })
+      .select('-passwordHash')
+      .sort({ isRootAdmin: -1, createdAt: 1 })
+      .lean();
+    return res.json({
+      currentUserId: req.user.id,
+      isRootAdmin: Boolean(req.user.isRootAdmin),
+      admins
+    });
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to load administrators' });
+  }
+});
+
+// POST /api/admin/admins — Create a new Administrator directly (ROOT ADMIN ONLY)
+app.post('/api/admin/admins', requireAuth, requireRootAdmin, async (req, res) => {
+  try {
+    const name = typeof req.body.name === 'string' ? req.body.name.trim() : '';
+    const email = typeof req.body.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+    const phone = typeof req.body.phone === 'string' ? req.body.phone.trim() : undefined;
+    const password = typeof req.body.password === 'string' ? req.body.password : '';
+
+    if (name.length < 2 || name.length > 60) {
+      return res.status(400).json({ error: 'Name must be between 2 and 60 characters' });
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).json({ error: 'Please enter a valid email address' });
+    }
+    if (password.length < 8 || password.length > 72) {
+      return res.status(400).json({ error: 'Password must be between 8 and 72 characters' });
+    }
+
+    const existingUser = await User.findOne({ email });
+    if (existingUser) {
+      if (existingUser.role === 'admin') {
+        return res.status(409).json({ error: 'User is already an administrator' });
+      }
+      existingUser.role = 'admin';
+      existingUser.isApproved = true;
+      existingUser.isRootAdmin = false;
+      await existingUser.save();
+      return res.status(200).json({ message: `${existingUser.name} promoted to Administrator by Root Admin`, admin: existingUser });
+    }
+
+    const passwordHash = await bcrypt.hash(password, 12);
+    const newAdmin = await User.create({
+      name,
+      email,
+      phone,
+      passwordHash,
+      role: 'admin',
+      isRootAdmin: false,
+      isApproved: true
+    });
+    return res.status(201).json({ message: 'Administrator created successfully by Root Admin', admin: newAdmin });
+  } catch (err) {
+    return res.status(500).json({ error: err.message || 'Failed to create administrator' });
+  }
+});
+
+// PATCH /api/admin/admins/:id/approve — Approve a pending Administrator (ROOT ADMIN ONLY)
+app.patch('/api/admin/admins/:id/approve', requireAuth, requireRootAdmin, async (req, res) => {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ error: 'Invalid admin ID' });
+    }
+    const adminUser = await User.findById(req.params.id);
+    if (!adminUser || adminUser.role !== 'admin') {
+      return res.status(404).json({ error: 'Administrator not found' });
+    }
+    adminUser.isApproved = true;
+    await adminUser.save();
+    return res.json({ message: `${adminUser.name} has been approved as Administrator by Root Admin`, admin: adminUser });
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to approve administrator' });
+  }
+});
+
+// PATCH /api/admin/admins/:id/revoke — Revoke / demote an Administrator (ROOT ADMIN ONLY)
+app.patch('/api/admin/admins/:id/revoke', requireAuth, requireRootAdmin, async (req, res) => {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ error: 'Invalid admin ID' });
+    }
+    const adminUser = await User.findById(req.params.id);
+    if (!adminUser || adminUser.role !== 'admin') {
+      return res.status(404).json({ error: 'Administrator not found' });
+    }
+    if (adminUser.isRootAdmin) {
+      return res.status(403).json({ error: 'Cannot revoke Root Admin privileges' });
+    }
+    adminUser.role = 'customer';
+    adminUser.isApproved = true;
+    await adminUser.save();
+    return res.json({ message: `${adminUser.name} admin privileges revoked`, user: adminUser });
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to revoke administrator' });
   }
 });
 
@@ -2315,10 +2609,42 @@ app.use((err, req, res, next) => {
 const PORT = Number(process.env.PORT) || 5000;
 let server;
 
+async function ensureRootAdmin() {
+  try {
+    const rootEmail = (process.env.ROOT_ADMIN_EMAIL || process.env.ADMIN_EMAIL || 'rootadmin@truehomes.local').trim().toLowerCase();
+    const existingRoot = await User.findOne({ isRootAdmin: true });
+    if (!existingRoot) {
+      const existingEmail = await User.findOne({ email: rootEmail });
+      if (existingEmail) {
+        existingEmail.role = 'admin';
+        existingEmail.isRootAdmin = true;
+        existingEmail.isApproved = true;
+        await existingEmail.save();
+        log('info', 'Designated existing account as Root Admin', { email: rootEmail });
+      } else {
+        const passwordHash = await bcrypt.hash(process.env.ROOT_ADMIN_PASSWORD || 'RootAdmin@123', 12);
+        await User.create({
+          name: 'Root Administrator',
+          email: rootEmail,
+          phone: '+91 9999900000',
+          passwordHash,
+          role: 'admin',
+          isRootAdmin: true,
+          isApproved: true
+        });
+        log('info', 'Created default Root Admin account', { email: rootEmail });
+      }
+    }
+  } catch (err) {
+    log('error', 'ensureRootAdmin failed', { error: err.message });
+  }
+}
+
 async function startServer() {
   try {
     await mongoose.connect(process.env.MONGO_URI);
     log('info', 'MongoDB connected');
+    await ensureRootAdmin();
     server = app.listen(PORT, () => {
       log('info', 'TrueHomes server started', { port: PORT });
     });
